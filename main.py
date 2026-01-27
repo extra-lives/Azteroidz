@@ -471,6 +471,7 @@ def main():
     game_over = False
 
     shield_time = 0.0
+    shield_stock = 0
     rapid_time = 0.0
     asteroid_spawn_timer = 0.0
     thrusting_render = False
@@ -487,6 +488,10 @@ def main():
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_F1:
                     show_gamepad_debug = not show_gamepad_debug
+                elif event.key == pygame.K_r and not game_over:
+                    if shield_stock > 0 and shield_time <= 0:
+                        shield_stock -= 1
+                        shield_time = 8.0
 
         keys = pygame.key.get_pressed()
         if joystick:
@@ -505,6 +510,7 @@ def main():
             score = 0
             lives = 3
             shield_time = 0.0
+            shield_stock = 0
             rapid_time = 0.0
             game_over = False
 
@@ -518,6 +524,7 @@ def main():
                     "score": score,
                     "lives": lives,
                     "shield_time": shield_time,
+                    "shield_stock": shield_stock,
                     "rapid_time": rapid_time,
                 },
                 "asteroids": [serialize_asteroid(a) for a in asteroids],
@@ -549,6 +556,7 @@ def main():
                 score = player["score"]
                 lives = player["lives"]
                 shield_time = player["shield_time"]
+                shield_stock = player.get("shield_stock", 0)
                 rapid_time = player["rapid_time"]
                 game_over = False
 
@@ -750,7 +758,7 @@ def main():
             for pickup in pickups:
                 if moving_circle_hit(ship_prev, ship_pos, pickup["pos"], pickup["pos"], SHIP_RADIUS + 10):
                     if pickup["kind"] == "shield":
-                        shield_time = 8.0
+                        shield_stock += 1
                     else:
                         rapid_time = 7.0
                     pickups.remove(pickup)
@@ -1014,6 +1022,7 @@ def main():
             f"Score: {score}",
             f"Lives: {lives}",
             f"Shield: {shield_time:.1f}s" if shield_time > 0 else "Shield: -",
+            f"Shield Stock: {shield_stock}",
             f"Rapid: {rapid_time:.1f}s" if rapid_time > 0 else "Rapid: -",
             f"Enemies: {len(enemies)}",
         ]
@@ -1021,7 +1030,7 @@ def main():
             text = font.render(line, True, COLORS["ui"])
             screen.blit(text, (10, 10 + i * 20))
 
-        help_text = "Arrows/WASD move  Space shoot  Q stop  F5 save  L load  N new seed"
+        help_text = "Arrows/WASD move  Space shoot  R shield  Q stop  F5 save  L load  N new seed"
         text = font.render(help_text, True, COLORS["ui"])
         screen.blit(text, (10, HEIGHT - 28))
 

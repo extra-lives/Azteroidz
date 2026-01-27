@@ -50,9 +50,21 @@ ASTEROID_SPAWN_BUFFER = 220
 ASTEROID_SPAWN_INTERVAL = 1.2
 ASTEROID_OFFSCREEN_MARGIN = 220
 
-PICKUP_TTL = 10.0
+ENEMY_COUNT = 1000
+ENEMY_RADIUS = 12
+ENEMY_SCOUT_SPEED = 120
+ENEMY_PURSUE_SPEED = 140
+ENEMY_TURN_SPEED = 110
+ENEMY_PURSUE_RADIUS = 450
+ENEMY_FIRE_RANGE = 500
+ENEMY_FIRE_COOLDOWN = 1.4
+ENEMY_BULLET_SPEED = 420
+ENEMY_BULLET_TTL = 4.0
+ENEMY_SHIELD_HITS = 1
+
+PICKUP_TTL = 15.0
 PICKUP_GRID_SPACING = 1.25
-STAR_COUNT = 600
+STAR_COUNT = 500
 JOY_AXIS_X = 0
 JOY_AXIS_Y = 4
 JOY_AXIS_DEADZONE = 0.5
@@ -67,6 +79,8 @@ COLORS = {
     "moon": (120, 170, 255),
     "pickup_shield": (120, 200, 255),
     "pickup_rapid": (255, 190, 120),
+    "enemy": (235, 90, 90),
+    "enemy_shield": (255, 140, 140),
     "ui": (200, 200, 200),
     "warning": (255, 140, 140),
 }
@@ -99,6 +113,19 @@ def toroidal_delta_world(a, b):
 def angle_to_vector(angle_deg):
     radians = math.radians(angle_deg)
     return pygame.Vector2(math.cos(radians), math.sin(radians))
+
+
+def vector_to_angle(vec):
+    return math.degrees(math.atan2(vec.y, vec.x))
+
+
+def turn_towards(current, target, max_turn):
+    diff = (target - current + 180) % 360 - 180
+    if diff > max_turn:
+        return current + max_turn
+    if diff < -max_turn:
+        return current - max_turn
+    return target
 
 
 def seed_from_time():
@@ -168,6 +195,20 @@ def spawn_pickup(rng):
     return {"kind": kind, "pos": pos, "ttl": PICKUP_TTL}
 
 
+def spawn_enemy(rng):
+    pos = pygame.Vector2(rng.uniform(0, WORLD_WIDTH), rng.uniform(0, WORLD_HEIGHT))
+    angle = rng.uniform(0, 360)
+    return {
+        "pos": pos,
+        "vel": pygame.Vector2(0, 0),
+        "angle": angle,
+        "shield": ENEMY_SHIELD_HITS,
+        "fire_timer": rng.uniform(0, ENEMY_FIRE_COOLDOWN),
+        "wander_timer": rng.uniform(0.5, 1.5),
+        "wander_angle": angle,
+    }
+
+
 def segment_hits_circle(rel_prev, rel_curr, radius):
     radius_sq = radius * radius
     if rel_prev.length_squared() <= radius_sq or rel_curr.length_squared() <= radius_sq:
@@ -234,6 +275,14 @@ def generate_pickups(seed):
     return pickups
 
 
+def generate_enemies(seed):
+    rng = random.Random(seed ^ 0x1EADBEEF)
+    enemies = []
+    for _ in range(ENEMY_COUNT):
+        enemies.append(spawn_enemy(rng))
+    return enemies
+
+
 def generate_starfield(seed):
     rng = random.Random(seed ^ 0xA5A5A5A5)
     stars = []
@@ -252,9 +301,10 @@ def new_world(seed):
         size = 4 if rng.random() < 0.12 else 3
         asteroids.append(spawn_asteroid(rng, size))
     pickups = generate_pickups(seed)
+    enemies = generate_enemies(seed)
     landmarks = generate_landmarks(seed)
     stars = generate_starfield(seed)
-    return asteroids, pickups, landmarks, stars
+    return asteroids, pickups, enemies, landmarks, stars
 
 
 def load_state():
@@ -307,6 +357,30 @@ def serialize_pickup(pickup):
 
 def deserialize_pickup(data):
     return {"kind": data["kind"], "pos": deserialize_vec(data["pos"]), "ttl": data["ttl"]}
+
+
+def serialize_enemy(enemy):
+    return {
+        "pos": serialize_vec(enemy["pos"]),
+        "angle": enemy["angle"],
+        "shield": enemy["shield"],
+        "fire_timer": enemy["fire_timer"],
+        "wander_timer": enemy["wander_timer"],
+        "wander_angle": enemy["wander_angle"],
+    }
+
+
+def deserialize_enemy(data):
+    angle = data.get("angle", 0.0)
+    return {
+        "pos": deserialize_vec(data["pos"]),
+        "vel": pygame.Vector2(0, 0),
+        "angle": angle,
+        "shield": data.get("shield", ENEMY_SHIELD_HITS),
+        "fire_timer": data.get("fire_timer", 0.0),
+        "wander_timer": data.get("wander_timer", 0.0),
+        "wander_angle": data.get("wander_angle", angle),
+    }
 
 
 def draw_vector_shape(surface, pos, angle, points, color, width=2):
@@ -383,13 +457,14 @@ def main():
         joy_hats = joystick.get_numhats()
 
     seed = seed_from_time()
-    asteroids, pickups, landmarks, stars = new_world(seed)
+    asteroids, pickups, enemies, landmarks, stars = new_world(seed)
 
     ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
     ship_vel = pygame.Vector2(0, 0)
     ship_angle = -90
 
     bullets = []
+    enemy_bullets = []
     fire_timer = 0.0
     score = 0
     lives = 3
@@ -421,8 +496,9 @@ def main():
 
         if keys[pygame.K_n]:
             seed = seed_from_time()
-            asteroids, pickups, landmarks, stars = new_world(seed)
+            asteroids, pickups, enemies, landmarks, stars = new_world(seed)
             bullets = []
+            enemy_bullets = []
             ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
             ship_vel = pygame.Vector2(0, 0)
             ship_angle = -90
@@ -446,6 +522,7 @@ def main():
                 },
                 "asteroids": [serialize_asteroid(a) for a in asteroids],
                 "pickups": [serialize_pickup(p) for p in pickups],
+                "enemies": [serialize_enemy(e) for e in enemies],
             }
             save_state(state)
 
@@ -455,6 +532,14 @@ def main():
                 seed = data["seed"]
                 asteroids = [deserialize_asteroid(a) for a in data["asteroids"]]
                 pickups = [deserialize_pickup(p) for p in data["pickups"]]
+                if "enemies" in data:
+                    enemies = [deserialize_enemy(e) for e in data["enemies"]]
+                else:
+                    enemies = generate_enemies(seed)
+                if len(enemies) < ENEMY_COUNT:
+                    rng = random.Random(seed ^ int(time.time()))
+                    for _ in range(ENEMY_COUNT - len(enemies)):
+                        enemies.append(spawn_enemy(rng))
                 landmarks = generate_landmarks(seed)
                 stars = generate_starfield(seed)
                 player = data["player"]
@@ -575,6 +660,13 @@ def main():
             if bullet["ttl"] <= 0:
                 bullets.remove(bullet)
 
+        for bullet in enemy_bullets[:]:
+            bullet["prev"] = pygame.Vector2(bullet["pos"])
+            bullet["pos"] += bullet["vel"] * dt
+            bullet["ttl"] -= dt
+            if bullet["ttl"] <= 0:
+                enemy_bullets.remove(bullet)
+
         for asteroid in asteroids:
             asteroid["prev"] = pygame.Vector2(asteroid["pos"])
             asteroid["pos"] += asteroid["vel"] * dt
@@ -594,6 +686,42 @@ def main():
                 for _ in range(to_spawn):
                     size = 4 if rng.random() < 0.12 else 3
                     asteroids.append(spawn_asteroid_near(rng, size, ship_pos))
+
+        for enemy in enemies:
+            enemy["prev"] = pygame.Vector2(enemy["pos"])
+            to_player = toroidal_delta_world(enemy["pos"], ship_pos)
+            dist_sq = to_player.length_squared()
+            pursuing = dist_sq <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS
+            if pursuing and dist_sq > 0:
+                target_angle = vector_to_angle(to_player)
+                enemy["angle"] = turn_towards(enemy["angle"], target_angle, ENEMY_TURN_SPEED * dt)
+                speed = ENEMY_PURSUE_SPEED
+            else:
+                enemy["wander_timer"] -= dt
+                if enemy["wander_timer"] <= 0:
+                    enemy["wander_timer"] = random.uniform(0.8, 2.2)
+                    enemy["wander_angle"] = (enemy["angle"] + random.uniform(-120, 120)) % 360
+                enemy["angle"] = turn_towards(enemy["angle"], enemy["wander_angle"], ENEMY_TURN_SPEED * dt * 0.6)
+                speed = ENEMY_SCOUT_SPEED
+
+            enemy["vel"] = angle_to_vector(enemy["angle"]) * speed
+            enemy["pos"] = wrap_position(enemy["pos"] + enemy["vel"] * dt)
+            enemy["fire_timer"] = max(0.0, enemy["fire_timer"] - dt)
+            if (
+                pursuing
+                and dist_sq <= ENEMY_FIRE_RANGE * ENEMY_FIRE_RANGE
+                and enemy["fire_timer"] <= 0.0
+            ):
+                bullet_vel = angle_to_vector(enemy["angle"]) * ENEMY_BULLET_SPEED + enemy["vel"] * 0.2
+                enemy_bullets.append(
+                    {
+                        "pos": pygame.Vector2(enemy["pos"]),
+                        "prev": pygame.Vector2(enemy["pos"]),
+                        "vel": bullet_vel,
+                        "ttl": ENEMY_BULLET_TTL,
+                    }
+                )
+                enemy["fire_timer"] = ENEMY_FIRE_COOLDOWN
 
         # Pickups persist until collected.
 
@@ -628,6 +756,29 @@ def main():
                     pickups.remove(pickup)
                     break
 
+            for bullet in enemy_bullets[:]:
+                if moving_circle_hit(bullet["prev"], bullet["pos"], ship_prev, ship_pos, SHIP_RADIUS + 4):
+                    enemy_bullets.remove(bullet)
+                    if shield_time <= 0:
+                        lives -= 1
+                        ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
+                        ship_vel = pygame.Vector2(0, 0)
+                        if lives <= 0:
+                            game_over = True
+                    break
+
+            for enemy in enemies:
+                enemy_prev = enemy.get("prev", enemy["pos"])
+                hit_radius = ENEMY_RADIUS + SHIP_RADIUS
+                if moving_circle_hit(enemy_prev, enemy["pos"], ship_prev, ship_pos, hit_radius):
+                    if shield_time <= 0:
+                        lives -= 1
+                        ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
+                        ship_vel = pygame.Vector2(0, 0)
+                        if lives <= 0:
+                            game_over = True
+                    break
+
             for asteroid in asteroids[:]:
                 asteroid_prev = asteroid.get("prev", asteroid["pos"])
                 hit_radius = asteroid["radius"] + SHIP_RADIUS
@@ -641,6 +792,23 @@ def main():
                     break
 
             for bullet in bullets[:]:
+                hit_enemy = None
+                for enemy in enemies:
+                    enemy_prev = enemy.get("prev", enemy["pos"])
+                    bullet_prev = bullet.get("prev", bullet["pos"])
+                    radius = ENEMY_RADIUS + BULLET_HIT_SLOP
+                    if moving_circle_hit(bullet_prev, bullet["pos"], enemy_prev, enemy["pos"], radius):
+                        hit_enemy = enemy
+                        break
+                if hit_enemy:
+                    bullets.remove(bullet)
+                    if hit_enemy["shield"] > 0:
+                        hit_enemy["shield"] -= 1
+                    else:
+                        enemies.remove(hit_enemy)
+                        score += 100
+                    continue
+
                 hit = None
                 for asteroid in asteroids:
                     asteroid_prev = asteroid.get("prev", asteroid["pos"])
@@ -661,6 +829,18 @@ def main():
                             child["vel"] = hit["vel"].rotate(rng.uniform(-50, 50)) * 1.2
                             asteroids.append(child)
                     break
+
+            for enemy in enemies[:]:
+                if enemy["shield"] > 0:
+                    continue
+                enemy_prev = enemy.get("prev", enemy["pos"])
+                for asteroid in asteroids:
+                    asteroid_prev = asteroid.get("prev", asteroid["pos"])
+                    hit_radius = asteroid["radius"] + ENEMY_RADIUS
+                    if moving_circle_hit(enemy_prev, enemy["pos"], asteroid_prev, asteroid["pos"], hit_radius):
+                        enemies.remove(enemy)
+                        score += 100
+                        break
 
             for landmark in landmarks:
                 hit_radius = landmark["radius"] + SHIP_RADIUS
@@ -750,6 +930,30 @@ def main():
                 1,
             )
 
+        for bullet in enemy_bullets:
+            screen_pos = world_to_screen(bullet["pos"], ship_pos)
+            bullet_radius = max(1, int(2 * CAMERA_ZOOM))
+            pygame.draw.circle(
+                screen,
+                COLORS["enemy"],
+                (int(screen_pos.x), int(screen_pos.y)),
+                bullet_radius,
+                1,
+            )
+
+        for enemy in enemies:
+            screen_pos = world_to_screen(enemy["pos"], ship_pos)
+            if enemy["shield"] > 0:
+                shield_radius = (ENEMY_RADIUS + 8) * CAMERA_ZOOM
+                pygame.draw.circle(
+                    screen,
+                    COLORS["enemy_shield"],
+                    (int(screen_pos.x), int(screen_pos.y)),
+                    max(1, int(shield_radius)),
+                    1,
+                )
+            draw_ship(screen, screen_pos, enemy["angle"], COLORS["enemy"])
+
         for pickup in pickups:
             color = COLORS["pickup_shield"] if pickup["kind"] == "shield" else COLORS["pickup_rapid"]
             screen_pos = world_to_screen(pickup["pos"], ship_pos)
@@ -811,12 +1015,13 @@ def main():
             f"Lives: {lives}",
             f"Shield: {shield_time:.1f}s" if shield_time > 0 else "Shield: -",
             f"Rapid: {rapid_time:.1f}s" if rapid_time > 0 else "Rapid: -",
+            f"Enemies: {len(enemies)}",
         ]
         for i, line in enumerate(hud):
             text = font.render(line, True, COLORS["ui"])
             screen.blit(text, (10, 10 + i * 20))
 
-        help_text = "Arrows/WASD move  Space shoot  F5 save  L load  N new seed"
+        help_text = "Arrows/WASD move  Space shoot  Q stop  F5 save  L load  N new seed"
         text = font.render(help_text, True, COLORS["ui"])
         screen.blit(text, (10, HEIGHT - 28))
 

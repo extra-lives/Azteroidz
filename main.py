@@ -233,15 +233,34 @@ def generate_landmarks(seed):
     landmarks = []
     planet_count = rng.randint(12, 20)
     planets = []
+    planet_id = 0
     for _ in range(planet_count):
         radius = rng.randint(880, 1440)
         for _ in range(40):
             pos = pygame.Vector2(rng.uniform(0, WORLD_WIDTH), rng.uniform(0, WORLD_HEIGHT))
             if all((pos - p["pos"]).length() >= p["radius"] + radius + 220 for p in planets):
-                planets.append({"kind": "planet", "pos": pos, "radius": radius, "color": COLORS["planet"]})
+                planets.append(
+                    {
+                        "id": planet_id,
+                        "kind": "planet",
+                        "pos": pos,
+                        "radius": radius,
+                        "color": COLORS["planet"],
+                    }
+                )
+                planet_id += 1
                 break
         else:
-            planets.append({"kind": "planet", "pos": pos, "radius": radius, "color": COLORS["planet"]})
+            planets.append(
+                {
+                    "id": planet_id,
+                    "kind": "planet",
+                    "pos": pos,
+                    "radius": radius,
+                    "color": COLORS["planet"],
+                }
+            )
+            planet_id += 1
     landmarks.extend(planets)
     for parent in planets:
         offset = pygame.Vector2(rng.uniform(parent["radius"] + 300, parent["radius"] + 700), 0).rotate(
@@ -475,6 +494,8 @@ def main():
     rapid_time = 0.0
     asteroid_spawn_timer = 0.0
     thrusting_render = False
+    show_map = False
+    discovered_planets = set()
 
     running = True
     while running:
@@ -488,6 +509,8 @@ def main():
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_F1:
                     show_gamepad_debug = not show_gamepad_debug
+                elif event.key == pygame.K_m:
+                    show_map = not show_map
                 elif event.key == pygame.K_r and not game_over:
                     if shield_stock > 0 and shield_time <= 0:
                         shield_stock -= 1
@@ -498,6 +521,39 @@ def main():
             pygame.event.pump()
         if keys[pygame.K_ESCAPE]:
             running = False
+
+        if show_map:
+            screen.fill(COLORS["bg"])
+            margin = 80
+            map_w = WIDTH - margin * 2
+            map_h = HEIGHT - margin * 2
+            map_rect = pygame.Rect(margin, margin, map_w, map_h)
+            pygame.draw.rect(screen, COLORS["ui"], map_rect, 2)
+            map_scale_x = map_rect.width / WORLD_WIDTH
+            map_scale_y = map_rect.height / WORLD_HEIGHT
+            map_scale = min(map_scale_x, map_scale_y)
+            for landmark in landmarks:
+                if landmark.get("kind") != "planet":
+                    continue
+                if landmark.get("id") not in discovered_planets:
+                    continue
+                map_x = map_rect.x + (landmark["pos"].x / WORLD_WIDTH) * map_rect.width
+                map_y = map_rect.y + (landmark["pos"].y / WORLD_HEIGHT) * map_rect.height
+                map_radius = max(1, int(landmark["radius"] * map_scale))
+                pygame.draw.circle(
+                    screen,
+                    COLORS["planet"],
+                    (int(map_x), int(map_y)),
+                    map_radius,
+                    1,
+                )
+            map_x = map_rect.x + (ship_pos.x / WORLD_WIDTH) * map_rect.width
+            map_y = map_rect.y + (ship_pos.y / WORLD_HEIGHT) * map_rect.height
+            pygame.draw.circle(screen, COLORS["pickup_shield"], (int(map_x), int(map_y)), 5, 0)
+            title = font.render("Map - press M to close", True, COLORS["ui"])
+            screen.blit(title, (WIDTH / 2 - title.get_width() / 2, 24))
+            pygame.display.flip()
+            continue
 
         if keys[pygame.K_n]:
             seed = seed_from_time()
@@ -513,6 +569,7 @@ def main():
             shield_stock = 0
             rapid_time = 0.0
             game_over = False
+            discovered_planets = set()
 
         if keys[pygame.K_F5]:
             state = {
@@ -530,6 +587,7 @@ def main():
                 "asteroids": [serialize_asteroid(a) for a in asteroids],
                 "pickups": [serialize_pickup(p) for p in pickups],
                 "enemies": [serialize_enemy(e) for e in enemies],
+                "discovered_planets": sorted(discovered_planets),
             }
             save_state(state)
 
@@ -559,6 +617,7 @@ def main():
                 shield_stock = player.get("shield_stock", 0)
                 rapid_time = player["rapid_time"]
                 game_over = False
+                discovered_planets = set(data.get("discovered_planets", []))
 
         if not game_over:
             turn = 0
@@ -921,6 +980,13 @@ def main():
                 max(1, int(draw_radius)),
                 2,
             )
+            if landmark.get("kind") == "planet":
+                on_screen = (
+                    -draw_radius <= screen_pos.x <= WIDTH + draw_radius
+                    and -draw_radius <= screen_pos.y <= HEIGHT + draw_radius
+                )
+                if on_screen:
+                    discovered_planets.add(landmark.get("id"))
 
         for asteroid in asteroids:
             screen_pos = world_to_screen(asteroid["pos"], ship_pos)
@@ -1030,7 +1096,7 @@ def main():
             text = font.render(line, True, COLORS["ui"])
             screen.blit(text, (10, 10 + i * 20))
 
-        help_text = "Arrows/WASD move  Space shoot  R shield  Q stop  F5 save  L load  N new seed"
+        help_text = "Arrows/WASD move  Space shoot  R shield  M map  Q stop  F5 save  L load  N new seed"
         text = font.render(help_text, True, COLORS["ui"])
         screen.blit(text, (10, HEIGHT - 28))
 

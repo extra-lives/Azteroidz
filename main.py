@@ -455,12 +455,12 @@ def draw_edge_arrow(surface, direction, color):
     pygame.draw.polygon(surface, color, [(tip.x, tip.y), (left.x, left.y), (right.x, right.y)], 2)
 
 
-def draw_thruster(surface, pos, angle, color):
+def draw_thruster(surface, pos, angle, color, scale=1.0):
     render_radius = SHIP_RADIUS * CAMERA_ZOOM
     back = pygame.Vector2(-render_radius * 1.7, 0).rotate(angle)
     perp = pygame.Vector2(0, render_radius * 0.35).rotate(angle)
     base = pos + back
-    lengths = [render_radius * 1.8, render_radius * 1.3, render_radius * 0.9]
+    lengths = [render_radius * 1.8 * scale, render_radius * 1.3 * scale, render_radius * 0.9 * scale]
     offsets = [0.0, render_radius * 0.22, -render_radius * 0.22]
     for length, offset in zip(lengths, offsets):
         start = base + perp * offset
@@ -508,6 +508,7 @@ def main():
     shield_stock = 0
     rapid_time = 0.0
     boost_time = 0.0
+    boost_stock = 0
     asteroid_spawn_timer = 0.0
     thrusting_render = False
     show_map = False
@@ -531,6 +532,10 @@ def main():
                     if shield_stock > 0 and shield_time <= 0:
                         shield_stock -= 1
                         shield_time = 8.0
+                elif event.key == pygame.K_f and not game_over:
+                    if boost_stock > 0 and boost_time <= 0:
+                        boost_stock -= 1
+                        boost_time = BOOST_TIME
 
         keys = pygame.key.get_pressed()
         if joystick:
@@ -585,6 +590,7 @@ def main():
             shield_stock = 0
             rapid_time = 0.0
             boost_time = 0.0
+            boost_stock = 0
             game_over = False
             discovered_planets = set()
 
@@ -601,6 +607,7 @@ def main():
                     "shield_stock": shield_stock,
                     "rapid_time": rapid_time,
                     "boost_time": boost_time,
+                    "boost_stock": boost_stock,
                 },
                 "asteroids": [serialize_asteroid(a) for a in asteroids],
                 "pickups": [serialize_pickup(p) for p in pickups],
@@ -635,6 +642,7 @@ def main():
                 shield_stock = player.get("shield_stock", 0)
                 rapid_time = player["rapid_time"]
                 boost_time = player.get("boost_time", 0.0)
+                boost_stock = player.get("boost_stock", 0)
                 game_over = False
                 discovered_planets = set(data.get("discovered_planets", []))
 
@@ -843,7 +851,7 @@ def main():
                     if pickup["kind"] == "shield":
                         shield_stock += 1
                     elif pickup["kind"] == "boost":
-                        boost_time = BOOST_TIME
+                        boost_stock += 1
                     else:
                         rapid_time = 7.0
                     pickups.remove(pickup)
@@ -1108,7 +1116,14 @@ def main():
 
         ship_color = COLORS["warning"] if game_over else COLORS["ship"]
         if thrusting_render and not game_over:
-            draw_thruster(screen, pygame.Vector2(WIDTH / 2, HEIGHT / 2), ship_angle, COLORS["pickup_rapid"])
+            thruster_scale = 2.0 if boost_time > 0 else 1.0
+            draw_thruster(
+                screen,
+                pygame.Vector2(WIDTH / 2, HEIGHT / 2),
+                ship_angle,
+                COLORS["pickup_rapid"],
+                thruster_scale,
+            )
         draw_ship(screen, pygame.Vector2(WIDTH / 2, HEIGHT / 2), ship_angle, ship_color)
 
         nearest_planet = None
@@ -1150,13 +1165,14 @@ def main():
             f"Shield Stock: {shield_stock}",
             f"Rapid: {rapid_time:.1f}s" if rapid_time > 0 else "Rapid: -",
             f"Boost: {boost_time:.1f}s" if boost_time > 0 else "Boost: -",
+            f"Boost Stock: {boost_stock}",
             f"Enemies: {len(enemies)}",
         ]
         for i, line in enumerate(hud):
             text = font.render(line, True, COLORS["ui"])
             screen.blit(text, (10, 10 + i * 20))
 
-        help_text = "Arrows/WASD move  Space shoot  R shield  M map  Q stop  F5 save  L load  N new seed"
+        help_text = "Arrows/WASD move  Space shoot  R shield  F boost  M map  Q stop  F5 save  L load  N new seed"
         text = font.render(help_text, True, COLORS["ui"])
         screen.blit(text, (10, HEIGHT - 28))
 

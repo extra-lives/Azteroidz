@@ -51,7 +51,7 @@ ASTEROID_SPAWN_INTERVAL = 1.2
 ASTEROID_OFFSCREEN_MARGIN = 220
 
 PICKUP_TTL = 10.0
-PICKUP_SPAWN_TIME = 12.0
+PICKUP_GRID_SPACING = 1.25
 STAR_COUNT = 600
 JOY_AXIS_X = 0
 JOY_AXIS_Y = 4
@@ -212,6 +212,28 @@ def generate_landmarks(seed):
     return landmarks
 
 
+def generate_pickups(seed):
+    rng = random.Random(seed ^ 0x5F3759DF)
+    pickups = []
+    screen_w = WIDTH / CAMERA_ZOOM
+    screen_h = HEIGHT / CAMERA_ZOOM
+    cell_w = screen_w * PICKUP_GRID_SPACING
+    cell_h = screen_h * PICKUP_GRID_SPACING
+    x = 0.0
+    while x < WORLD_WIDTH:
+        y = 0.0
+        while y < WORLD_HEIGHT:
+            pos = pygame.Vector2(
+                min(WORLD_WIDTH - 1, x + rng.uniform(0, cell_w)),
+                min(WORLD_HEIGHT - 1, y + rng.uniform(0, cell_h)),
+            )
+            pickups.append(spawn_pickup(rng))
+            pickups[-1]["pos"] = pos
+            y += cell_h
+        x += cell_w
+    return pickups
+
+
 def generate_starfield(seed):
     rng = random.Random(seed ^ 0xA5A5A5A5)
     stars = []
@@ -229,7 +251,7 @@ def new_world(seed):
     for _ in range(120):
         size = 4 if rng.random() < 0.12 else 3
         asteroids.append(spawn_asteroid(rng, size))
-    pickups = []
+    pickups = generate_pickups(seed)
     landmarks = generate_landmarks(seed)
     stars = generate_starfield(seed)
     return asteroids, pickups, landmarks, stars
@@ -375,7 +397,6 @@ def main():
 
     shield_time = 0.0
     rapid_time = 0.0
-    pickup_timer = PICKUP_SPAWN_TIME
     asteroid_spawn_timer = 0.0
     thrusting_render = False
 
@@ -383,6 +404,7 @@ def main():
     while running:
         dt = clock.tick(FPS) / 1000.0
         ship_prev = pygame.Vector2(ship_pos)
+        shield_prev = shield_time
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -558,12 +580,6 @@ def main():
             asteroid["pos"] += asteroid["vel"] * dt
             asteroid["angle"] += asteroid["spin"] * dt
 
-        pickup_timer -= dt
-        if pickup_timer <= 0:
-            pickup_timer = PICKUP_SPAWN_TIME
-            rng = random.Random(seed + int(time.time()))
-            pickups.append(spawn_pickup(rng))
-
         asteroid_spawn_timer -= dt
         if asteroid_spawn_timer <= 0:
             asteroid_spawn_timer = ASTEROID_SPAWN_INTERVAL
@@ -582,22 +598,46 @@ def main():
         # Pickups persist until collected.
 
         if not game_over:
+            if shield_prev > 0 and shield_time <= 0:
+                for asteroid in asteroids:
+                    hit_radius = asteroid["radius"] + SHIP_RADIUS
+                    if moving_circle_hit(ship_pos, ship_pos, asteroid["pos"], asteroid["pos"], hit_radius):
+                        lives -= 1
+                        ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
+                        ship_vel = pygame.Vector2(0, 0)
+                        if lives <= 0:
+                            game_over = True
+                        break
+                if not game_over:
+                    for landmark in landmarks:
+                        hit_radius = landmark["radius"] + SHIP_RADIUS
+                        if moving_circle_hit(ship_pos, ship_pos, landmark["pos"], landmark["pos"], hit_radius):
+                            lives -= 1
+                            ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
+                            ship_vel = pygame.Vector2(0, 0)
+                            if lives <= 0:
+                                game_over = True
+                            break
+
             for pickup in pickups:
                 if moving_circle_hit(ship_prev, ship_pos, pickup["pos"], pickup["pos"], SHIP_RADIUS + 10):
                     if pickup["kind"] == "shield":
                         shield_time = 8.0
                     else:
                         rapid_time = 7.0
+                    pickups.remove(pickup)
+                    break
 
             for asteroid in asteroids[:]:
                 asteroid_prev = asteroid.get("prev", asteroid["pos"])
                 hit_radius = asteroid["radius"] + SHIP_RADIUS
                 if moving_circle_hit(ship_prev, ship_pos, asteroid_prev, asteroid["pos"], hit_radius):
-                    lives -= 1
-                    ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
-                    ship_vel = pygame.Vector2(0, 0)
-                    if lives <= 0:
-                        game_over = True
+                    if shield_time <= 0:
+                        lives -= 1
+                        ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
+                        ship_vel = pygame.Vector2(0, 0)
+                        if lives <= 0:
+                            game_over = True
                     break
 
             for bullet in bullets[:]:
@@ -625,11 +665,12 @@ def main():
             for landmark in landmarks:
                 hit_radius = landmark["radius"] + SHIP_RADIUS
                 if moving_circle_hit(ship_prev, ship_pos, landmark["pos"], landmark["pos"], hit_radius):
-                    lives -= 1
-                    ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
-                    ship_vel = pygame.Vector2(0, 0)
-                    if lives <= 0:
-                        game_over = True
+                    if shield_time <= 0:
+                        lives -= 1
+                        ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
+                        ship_vel = pygame.Vector2(0, 0)
+                        if lives <= 0:
+                            game_over = True
                     break
 
         if not asteroids:
@@ -719,7 +760,7 @@ def main():
 
         if shield_time > 0:
             shield_screen_pos = pygame.Vector2(WIDTH / 2, HEIGHT / 2)
-            shield_radius = SHIP_RADIUS * CAMERA_ZOOM + 6 * CAMERA_ZOOM
+            shield_radius = SHIP_RADIUS * CAMERA_ZOOM + 10 * CAMERA_ZOOM
             pygame.draw.circle(
                 screen,
                 COLORS["pickup_shield"],

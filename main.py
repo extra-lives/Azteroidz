@@ -56,14 +56,19 @@ ENEMY_SCOUT_SPEED = 120
 ENEMY_PURSUE_SPEED = 140
 ENEMY_TURN_SPEED = 110
 ENEMY_PURSUE_RADIUS = 450
-ENEMY_FIRE_RANGE = 500
+ENEMY_FIRE_RANGE = 300
 ENEMY_FIRE_COOLDOWN = 1.4
-ENEMY_BULLET_SPEED = 420
+ENEMY_BULLET_SPEED = 400
 ENEMY_BULLET_TTL = 4.0
 ENEMY_SHIELD_HITS = 1
 
 PICKUP_TTL = 15.0
 PICKUP_GRID_SPACING = 1.25
+PICKUP_RADIUS = 24
+CANISTER_RADIUS = 26
+CANISTER_HITS = 4
+BOOST_MULTIPLIER = 1.5
+BOOST_TIME = 3.0
 STAR_COUNT = 500
 JOY_AXIS_X = 0
 JOY_AXIS_Y = 4
@@ -79,6 +84,8 @@ COLORS = {
     "moon": (120, 170, 255),
     "pickup_shield": (120, 200, 255),
     "pickup_rapid": (255, 190, 120),
+    "pickup_boost": (255, 170, 90),
+    "pickup_canister": (255, 170, 90),
     "enemy": (235, 90, 90),
     "enemy_shield": (255, 140, 140),
     "ui": (200, 200, 200),
@@ -190,9 +197,10 @@ def spawn_asteroid_near(rng, size, center):
 
 
 def spawn_pickup(rng):
-    kind = rng.choice(["shield", "rapid"])
+    kind = rng.choice(["shield", "rapid", "boost_canister"])
     pos = pygame.Vector2(rng.uniform(0, WORLD_WIDTH), rng.uniform(0, WORLD_HEIGHT))
-    return {"kind": kind, "pos": pos, "ttl": PICKUP_TTL}
+    shell_hp = CANISTER_HITS if kind == "boost_canister" else 0
+    return {"kind": kind, "pos": pos, "ttl": PICKUP_TTL, "shell_hp": shell_hp}
 
 
 def spawn_enemy(rng):
@@ -231,11 +239,11 @@ def moving_circle_hit(prev_a, curr_a, prev_b, curr_b, radius):
 def generate_landmarks(seed):
     rng = random.Random(seed)
     landmarks = []
-    planet_count = rng.randint(12, 20)
+    planet_count = 20
     planets = []
     planet_id = 0
     for _ in range(planet_count):
-        radius = rng.randint(880, 1440)
+        radius = rng.randint(1760, 2880)
         for _ in range(40):
             pos = pygame.Vector2(rng.uniform(0, WORLD_WIDTH), rng.uniform(0, WORLD_HEIGHT))
             if all((pos - p["pos"]).length() >= p["radius"] + radius + 220 for p in planets):
@@ -263,11 +271,11 @@ def generate_landmarks(seed):
             planet_id += 1
     landmarks.extend(planets)
     for parent in planets:
-        offset = pygame.Vector2(rng.uniform(parent["radius"] + 300, parent["radius"] + 700), 0).rotate(
-            rng.uniform(0, 360)
-        )
+        size = rng.randint(int(parent["radius"] * 0.16), int(parent["radius"] * 0.4))
+        min_orbit = parent["radius"] + size + 120
+        max_orbit = parent["radius"] + size + 520
+        offset = pygame.Vector2(rng.uniform(min_orbit, max_orbit), 0).rotate(rng.uniform(0, 360))
         moon_pos = wrap_position(parent["pos"] + offset)
-        size = rng.randint(int(parent["radius"] * 0.08), int(parent["radius"] * 0.2))
         landmarks.append({"kind": "moon", "pos": moon_pos, "radius": size, "color": COLORS["moon"]})
     return landmarks
 
@@ -371,11 +379,18 @@ def deserialize_asteroid(data):
 
 
 def serialize_pickup(pickup):
-    return {"kind": pickup["kind"], "pos": serialize_vec(pickup["pos"]), "ttl": pickup["ttl"]}
+    return {
+        "kind": pickup["kind"],
+        "pos": serialize_vec(pickup["pos"]),
+        "ttl": pickup["ttl"],
+        "shell_hp": pickup.get("shell_hp", 0),
+    }
 
 
 def deserialize_pickup(data):
-    return {"kind": data["kind"], "pos": deserialize_vec(data["pos"]), "ttl": data["ttl"]}
+    kind = data["kind"]
+    shell_hp = data.get("shell_hp", CANISTER_HITS if kind == "boost_canister" else 0)
+    return {"kind": kind, "pos": deserialize_vec(data["pos"]), "ttl": data["ttl"], "shell_hp": shell_hp}
 
 
 def serialize_enemy(enemy):
@@ -492,6 +507,7 @@ def main():
     shield_time = 0.0
     shield_stock = 0
     rapid_time = 0.0
+    boost_time = 0.0
     asteroid_spawn_timer = 0.0
     thrusting_render = False
     show_map = False
@@ -568,6 +584,7 @@ def main():
             shield_time = 0.0
             shield_stock = 0
             rapid_time = 0.0
+            boost_time = 0.0
             game_over = False
             discovered_planets = set()
 
@@ -583,6 +600,7 @@ def main():
                     "shield_time": shield_time,
                     "shield_stock": shield_stock,
                     "rapid_time": rapid_time,
+                    "boost_time": boost_time,
                 },
                 "asteroids": [serialize_asteroid(a) for a in asteroids],
                 "pickups": [serialize_pickup(p) for p in pickups],
@@ -616,6 +634,7 @@ def main():
                 shield_time = player["shield_time"]
                 shield_stock = player.get("shield_stock", 0)
                 rapid_time = player["rapid_time"]
+                boost_time = player.get("boost_time", 0.0)
                 game_over = False
                 discovered_planets = set(data.get("discovered_planets", []))
 
@@ -674,9 +693,10 @@ def main():
             if stop_button:
                 stopping = True
 
+            boost_multiplier = BOOST_MULTIPLIER if boost_time > 0 else 1.0
             ship_angle += turn * SHIP_TURN_SPEED * dt
             if thrusting:
-                ship_vel += angle_to_vector(ship_angle) * SHIP_THRUST * dt
+                ship_vel += angle_to_vector(ship_angle) * (SHIP_THRUST * boost_multiplier) * dt
             if reversing:
                 forward = angle_to_vector(ship_angle)
                 forward_speed = ship_vel.dot(forward)
@@ -687,8 +707,9 @@ def main():
             if stopping:
                 ship_vel *= max(0.0, 1.0 - SHIP_STOP_DAMP * dt)
 
-            if ship_vel.length() > SHIP_MAX_SPEED:
-                ship_vel.scale_to_length(SHIP_MAX_SPEED)
+            max_speed = SHIP_MAX_SPEED * boost_multiplier
+            if ship_vel.length() > max_speed:
+                ship_vel.scale_to_length(max_speed)
 
             new_pos = ship_pos + ship_vel * dt
             wrapped = False
@@ -719,6 +740,7 @@ def main():
 
         shield_time = max(0.0, shield_time - dt)
         rapid_time = max(0.0, rapid_time - dt)
+        boost_time = max(0.0, boost_time - dt)
 
         for bullet in bullets[:]:
             bullet["prev"] = pygame.Vector2(bullet["pos"])
@@ -816,8 +838,12 @@ def main():
 
             for pickup in pickups:
                 if moving_circle_hit(ship_prev, ship_pos, pickup["pos"], pickup["pos"], SHIP_RADIUS + 10):
+                    if pickup["kind"] == "boost_canister":
+                        continue
                     if pickup["kind"] == "shield":
                         shield_stock += 1
+                    elif pickup["kind"] == "boost":
+                        boost_time = BOOST_TIME
                     else:
                         rapid_time = 7.0
                     pickups.remove(pickup)
@@ -874,6 +900,23 @@ def main():
                     else:
                         enemies.remove(hit_enemy)
                         score += 100
+                    continue
+
+                hit_canister = None
+                for pickup in pickups:
+                    if pickup["kind"] != "boost_canister":
+                        continue
+                    bullet_prev = bullet.get("prev", bullet["pos"])
+                    radius = CANISTER_RADIUS + BULLET_HIT_SLOP
+                    if moving_circle_hit(bullet_prev, bullet["pos"], pickup["pos"], pickup["pos"], radius):
+                        hit_canister = pickup
+                        break
+                if hit_canister:
+                    bullets.remove(bullet)
+                    hit_canister["shell_hp"] = max(0, hit_canister.get("shell_hp", CANISTER_HITS) - 1)
+                    if hit_canister["shell_hp"] <= 0:
+                        hit_canister["kind"] = "boost"
+                        hit_canister["shell_hp"] = 0
                     continue
 
                 hit = None
@@ -1029,10 +1072,26 @@ def main():
             draw_ship(screen, screen_pos, enemy["angle"], COLORS["enemy"])
 
         for pickup in pickups:
-            color = COLORS["pickup_shield"] if pickup["kind"] == "shield" else COLORS["pickup_rapid"]
             screen_pos = world_to_screen(pickup["pos"], ship_pos)
-            pickup_radius = max(2, int(8 * CAMERA_ZOOM))
-            core_radius = max(1, int(2 * CAMERA_ZOOM))
+            if pickup["kind"] == "boost_canister":
+                shell_radius = max(2, int(CANISTER_RADIUS * CAMERA_ZOOM))
+                core_radius = max(1, int((PICKUP_RADIUS * 0.45) * CAMERA_ZOOM))
+                shell_rect = pygame.Rect(0, 0, shell_radius * 2, shell_radius * 2)
+                shell_rect.center = (int(screen_pos.x), int(screen_pos.y))
+                core_rect = pygame.Rect(0, 0, core_radius * 2, core_radius * 2)
+                core_rect.center = (int(screen_pos.x), int(screen_pos.y))
+                pygame.draw.rect(screen, COLORS["pickup_canister"], shell_rect, 2)
+                pygame.draw.rect(screen, COLORS["pickup_canister"], core_rect, 1)
+                continue
+
+            if pickup["kind"] == "shield":
+                color = COLORS["pickup_shield"]
+            elif pickup["kind"] == "boost":
+                color = COLORS["pickup_boost"]
+            else:
+                color = COLORS["pickup_rapid"]
+            pickup_radius = max(2, int(PICKUP_RADIUS * CAMERA_ZOOM))
+            core_radius = max(1, int((PICKUP_RADIUS * 0.25) * CAMERA_ZOOM))
             pygame.draw.circle(screen, color, (int(screen_pos.x), int(screen_pos.y)), pickup_radius, 2)
             pygame.draw.circle(screen, color, (int(screen_pos.x), int(screen_pos.y)), core_radius, 0)
 
@@ -1090,6 +1149,7 @@ def main():
             f"Shield: {shield_time:.1f}s" if shield_time > 0 else "Shield: -",
             f"Shield Stock: {shield_stock}",
             f"Rapid: {rapid_time:.1f}s" if rapid_time > 0 else "Rapid: -",
+            f"Boost: {boost_time:.1f}s" if boost_time > 0 else "Boost: -",
             f"Enemies: {len(enemies)}",
         ]
         for i, line in enumerate(hud):

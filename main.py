@@ -4,6 +4,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 import pygame
 
@@ -138,6 +139,16 @@ class Enemy:
     fire_timer: float
     wander_timer: float
     wander_angle: float
+
+
+@dataclass(slots=True)
+class Landmark:
+    id: int
+    kind: str
+    pos: pygame.Vector2
+    radius: int
+    color: tuple
+    parent_id: Optional[int] = None
 
 
 def wrap_position(pos):
@@ -353,46 +364,46 @@ def generate_landmarks(seed):
         radius = rng.randint(1760, 2880)
         for _ in range(40):
             pos = pygame.Vector2(rng.uniform(0, WORLD_WIDTH), rng.uniform(0, WORLD_HEIGHT))
-            if all((pos - p["pos"]).length() >= p["radius"] + radius + 220 for p in planets):
+            if all((pos - p.pos).length() >= p.radius + radius + 220 for p in planets):
                 planets.append(
-                    {
-                        "id": planet_id,
-                        "kind": "planet",
-                        "pos": pos,
-                        "radius": radius,
-                        "color": COLORS["planet"],
-                    }
+                    Landmark(
+                        id=planet_id,
+                        kind="planet",
+                        pos=pos,
+                        radius=radius,
+                        color=COLORS["planet"],
+                    )
                 )
                 planet_id += 1
                 break
         else:
             planets.append(
-                {
-                    "id": planet_id,
-                    "kind": "planet",
-                    "pos": pos,
-                    "radius": radius,
-                    "color": COLORS["planet"],
-                }
+                Landmark(
+                    id=planet_id,
+                    kind="planet",
+                    pos=pos,
+                    radius=radius,
+                    color=COLORS["planet"],
+                )
             )
             planet_id += 1
     landmarks.extend(planets)
     moon_id = 0
     for parent in planets:
-        size = rng.randint(int(parent["radius"] * 0.16), int(parent["radius"] * 0.4))
-        min_orbit = parent["radius"] + size + 120
-        max_orbit = parent["radius"] + size + 520
+        size = rng.randint(int(parent.radius * 0.16), int(parent.radius * 0.4))
+        min_orbit = parent.radius + size + 120
+        max_orbit = parent.radius + size + 520
         offset = pygame.Vector2(rng.uniform(min_orbit, max_orbit), 0).rotate(rng.uniform(0, 360))
-        moon_pos = clamp_position(parent["pos"] + offset, radius=size)
+        moon_pos = clamp_position(parent.pos + offset, radius=size)
         landmarks.append(
-            {
-                "id": moon_id,
-                "kind": "moon",
-                "pos": moon_pos,
-                "radius": size,
-                "color": COLORS["moon"],
-                "parent_id": parent["id"],
-            }
+            Landmark(
+                id=moon_id,
+                kind="moon",
+                pos=moon_pos,
+                radius=size,
+                color=COLORS["moon"],
+                parent_id=parent.id,
+            )
         )
         moon_id += 1
     return landmarks
@@ -443,7 +454,7 @@ def pick_nearest_moon(planet, moons):
     best = None
     best_dist_sq = None
     for moon in moons:
-        dist_sq = (moon["pos"] - planet["pos"]).length_squared()
+        dist_sq = (moon.pos - planet.pos).length_squared()
         if best_dist_sq is None or dist_sq < best_dist_sq:
             best_dist_sq = dist_sq
             best = moon
@@ -452,8 +463,8 @@ def pick_nearest_moon(planet, moons):
 
 def generate_freighters(seed, landmarks):
     rng = random.Random(seed ^ 0x7F4A7C15)
-    planets = [l for l in landmarks if l["kind"] == "planet"]
-    moons = [l for l in landmarks if l["kind"] == "moon"]
+    planets = [l for l in landmarks if l.kind == "planet"]
+    moons = [l for l in landmarks if l.kind == "moon"]
     if len(planets) < 2 or len(moons) < 2:
         return []
     freighters = []
@@ -463,16 +474,16 @@ def generate_freighters(seed, landmarks):
         dest_moon = pick_nearest_moon(dest, moons)
         if not origin_moon or not dest_moon:
             continue
-        pos = pygame.Vector2(origin_moon["pos"])
+        pos = pygame.Vector2(origin_moon.pos)
         speed = rng.uniform(*FREIGHTER_SPEED)
         freighters.append(
             {
                 "pos": pos,
                 "vel": pygame.Vector2(0, 0),
                 "angle": rng.uniform(0, 360),
-                "from": pygame.Vector2(origin_moon["pos"]),
-                "to": pygame.Vector2(dest_moon["pos"]),
-                "target": pygame.Vector2(dest_moon["pos"]),
+                "from": pygame.Vector2(origin_moon.pos),
+                "to": pygame.Vector2(dest_moon.pos),
+                "target": pygame.Vector2(dest_moon.pos),
                 "speed": speed,
             }
         )
@@ -745,20 +756,20 @@ def main():
             map_scale_y = map_rect.height / WORLD_HEIGHT
             map_scale = min(map_scale_x, map_scale_y)
             for landmark in landmarks:
-                kind = landmark.get("kind")
+                kind = landmark.kind
                 if kind == "planet":
-                    if landmark.get("id") not in discovered_planets:
+                    if landmark.id not in discovered_planets:
                         continue
                     color = COLORS["planet"]
                 elif kind == "moon":
-                    if landmark.get("parent_id") not in discovered_planets:
+                    if landmark.parent_id not in discovered_planets:
                         continue
                     color = COLORS["moon"]
                 else:
                     continue
-                map_x = map_rect.x + (landmark["pos"].x / WORLD_WIDTH) * map_rect.width
-                map_y = map_rect.y + (landmark["pos"].y / WORLD_HEIGHT) * map_rect.height
-                map_radius = max(1, int(landmark["radius"] * map_scale))
+                map_x = map_rect.x + (landmark.pos.x / WORLD_WIDTH) * map_rect.width
+                map_y = map_rect.y + (landmark.pos.y / WORLD_HEIGHT) * map_rect.height
+                map_radius = max(1, int(landmark.radius * map_scale))
                 pygame.draw.circle(screen, color, (int(map_x), int(map_y)), map_radius, 1)
             for freighter in freighters:
                 map_x = map_rect.x + (freighter["pos"].x / WORLD_WIDTH) * map_rect.width
@@ -1121,10 +1132,10 @@ def main():
                         break
                 if not game_over:
                     for landmark in landmarks:
-                        hit_radius = landmark["radius"] + SHIP_RADIUS
-                        if moving_circle_hit(ship_pos, ship_pos, landmark["pos"], landmark["pos"], hit_radius):
+                        hit_radius = landmark.radius + SHIP_RADIUS
+                        if moving_circle_hit(ship_pos, ship_pos, landmark.pos, landmark.pos, hit_radius):
                             lives -= 1
-                            if landmark.get("kind") == "moon":
+                            if landmark.kind == "moon":
                                 last_death_cause = "moon"
                             else:
                                 last_death_cause = "planet"
@@ -1339,11 +1350,11 @@ def main():
                         break
 
             for landmark in landmarks:
-                hit_radius = landmark["radius"] + SHIP_RADIUS
-                if moving_circle_hit(ship_prev, ship_pos, landmark["pos"], landmark["pos"], hit_radius):
+                hit_radius = landmark.radius + SHIP_RADIUS
+                if moving_circle_hit(ship_prev, ship_pos, landmark.pos, landmark.pos, hit_radius):
                     if shield_time <= 0:
                         lives -= 1
-                        if landmark.get("kind") == "moon":
+                        if landmark.kind == "moon":
                             last_death_cause = "moon"
                         else:
                             last_death_cause = "planet"
@@ -1366,8 +1377,8 @@ def main():
         for asteroid in asteroids[:]:
             for landmark in landmarks:
                 asteroid_prev = prev_pos(asteroid.pos, asteroid.vel, dt)
-                hit_radius = asteroid.radius + landmark["radius"]
-                if moving_circle_hit(asteroid_prev, asteroid.pos, landmark["pos"], landmark["pos"], hit_radius):
+                hit_radius = asteroid.radius + landmark.radius
+                if moving_circle_hit(asteroid_prev, asteroid.pos, landmark.pos, landmark.pos, hit_radius):
                     asteroids.remove(asteroid)
                     if asteroid.size > 1:
                         rng = random.Random(seed + int(asteroid.pos.x) + int(asteroid.pos.y))
@@ -1408,22 +1419,22 @@ def main():
             )
 
         for landmark in landmarks:
-            screen_pos = world_to_screen(landmark["pos"], ship_pos)
-            draw_radius = landmark["radius"] * CAMERA_ZOOM
+            screen_pos = world_to_screen(landmark.pos, ship_pos)
+            draw_radius = landmark.radius * CAMERA_ZOOM
             pygame.draw.circle(
                 screen,
-                landmark["color"],
+                landmark.color,
                 (int(screen_pos.x), int(screen_pos.y)),
                 max(1, int(draw_radius)),
                 2,
             )
-            if landmark.get("kind") == "planet":
+            if landmark.kind == "planet":
                 on_screen = (
                     -draw_radius <= screen_pos.x <= WIDTH + draw_radius
                     and -draw_radius <= screen_pos.y <= HEIGHT + draw_radius
                 )
                 if on_screen:
-                    discovered_planets.add(landmark.get("id"))
+                    discovered_planets.add(landmark.id)
 
         for asteroid in asteroids:
             screen_pos = world_to_screen(asteroid.pos, ship_pos)
@@ -1534,9 +1545,9 @@ def main():
         nearest_planet = None
         nearest_dist_sq = None
         for landmark in landmarks:
-            if landmark["kind"] != "planet":
+            if landmark.kind != "planet":
                 continue
-            delta = landmark["pos"] - ship_pos
+            delta = landmark.pos - ship_pos
             dist_sq = delta.length_squared()
             if nearest_dist_sq is None or dist_sq < nearest_dist_sq:
                 nearest_dist_sq = dist_sq

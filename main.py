@@ -4,7 +4,6 @@ import os
 import random
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 import pygame
 
@@ -61,7 +60,7 @@ ENEMY_PURSUE_RADIUS = 450
 ENEMY_FIRE_RANGE = 300
 ENEMY_FIRE_COOLDOWN = 1.4
 ENEMY_BULLET_SPEED = 400
-ENEMY_BULLET_TTL = 4.0
+ENEMY_BULLET_TTL = 2.0
 ENEMY_SHIELD_HITS = 1
 ENEMY_NEARBY_TARGET = 12
 ENEMY_NEARBY_RADIUS = 3600
@@ -77,7 +76,7 @@ PICKUP_RADIUS = 24
 CANISTER_RADIUS = 26
 CANISTER_HITS = 4
 BOOST_MULTIPLIER = 1.5
-BOOST_TIME = 3.0
+BOOST_TIME = 6.0
 STAR_COUNT = 500
 FREIGHTER_COUNT = 10
 FREIGHTER_SPEED = (70, 110)
@@ -85,12 +84,15 @@ FREIGHTER_RADIUS = SHIP_RADIUS * 4
 JOY_AXIS_X = 0
 JOY_AXIS_Y = 4
 JOY_AXIS_DEADZONE = 0.5
+DAMAGE_POPUP_TTL = 0.75
+DAMAGE_POPUP_SPEED = 85
+DAMAGE_POPUP_MAX = 35
 
 
 COLORS = {
     "bg": (5, 7, 10),
     "ship": (230, 230, 230),
-    "bullet": (255, 250, 200),
+    "bullet": (255, 240, 120),
     "asteroid": (245, 245, 245),
     "planet": (120, 220, 140),
     "moon": (120, 170, 255),
@@ -117,7 +119,6 @@ class Asteroid:
     spin: float
     angle: float
     shape: list
-    prev: Optional[pygame.Vector2] = None
 
 
 @dataclass(slots=True)
@@ -137,7 +138,6 @@ class Enemy:
     fire_timer: float
     wander_timer: float
     wander_angle: float
-    prev: Optional[pygame.Vector2] = None
 
 
 def wrap_position(pos):
@@ -171,6 +171,10 @@ def toroidal_delta_world(a, b):
     return pygame.Vector2(dx, dy)
 
 
+def prev_pos(pos, vel, dt):
+    return pos - vel * dt
+
+
 def angle_to_vector(angle_deg):
     radians = math.radians(angle_deg)
     return pygame.Vector2(math.cos(radians), math.sin(radians))
@@ -187,6 +191,27 @@ def turn_towards(current, target, max_turn):
     if diff < -max_turn:
         return current - max_turn
     return target
+
+
+def spawn_damage_popup(popups, pool, font, text, world_pos, color):
+    if len(popups) >= DAMAGE_POPUP_MAX:
+        return
+    surface = font.render(text, True, color)
+    drift = pygame.Vector2(random.uniform(-20, 20), -DAMAGE_POPUP_SPEED)
+    if pool:
+        popup = pool.pop()
+        popup["pos"].update(world_pos)
+        popup["vel"].update(drift)
+        popup["ttl"] = DAMAGE_POPUP_TTL
+        popup["surface"] = surface
+    else:
+        popup = {
+            "pos": pygame.Vector2(world_pos),
+            "vel": drift,
+            "ttl": DAMAGE_POPUP_TTL,
+            "surface": surface,
+        }
+    popups.append(popup)
 
 
 def seed_from_time():
@@ -633,6 +658,7 @@ def main():
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("Consolas", 18)
     debug_font = pygame.font.SysFont("Consolas", 16)
+    popup_font = pygame.font.SysFont("Consolas", 16, bold=True)
     joystick = None
     joy_name = "none"
     joy_axes = 0
@@ -656,13 +682,18 @@ def main():
 
     bullets = []
     enemy_bullets = []
+    bullet_pool = []
+    enemy_bullet_pool = []
+    damage_popups = []
+    damage_popup_pool = []
     fire_timer = 0.0
     score = 0
     lives = 3
     game_over = False
     last_death_cause = None
 
-    shield_time = 0.0
+    shield_time = 10.0
+    shield_size_mult = 3.0
     shield_stock = 0
     rapid_time = 0.0
     boost_time = 0.0
@@ -691,6 +722,7 @@ def main():
                     if shield_stock > 0 and shield_time <= 0:
                         shield_stock -= 1
                         shield_time = 8.0
+                        shield_size_mult = 1.0
                 elif event.key == pygame.K_f and not game_over:
                     if boost_stock > 0 and boost_time <= 0:
                         boost_stock -= 1
@@ -745,12 +777,17 @@ def main():
             asteroids, pickups, enemies, landmarks, stars, freighters = new_world(seed)
             bullets = []
             enemy_bullets = []
+            bullet_pool = []
+            enemy_bullet_pool = []
+            damage_popups = []
+            damage_popup_pool = []
             ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
             ship_vel = pygame.Vector2(0, 0)
             ship_angle = -90
             score = 0
             lives = 3
-            shield_time = 0.0
+            shield_time = 10.0
+            shield_size_mult = 3.0
             shield_stock = 0
             rapid_time = 0.0
             boost_time = 0.0
@@ -791,6 +828,10 @@ def main():
                     enemies = [deserialize_enemy(e) for e in data["enemies"]]
                 else:
                     enemies = generate_enemies(seed, pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2))
+                bullet_pool = []
+                enemy_bullet_pool = []
+                damage_popups = []
+                damage_popup_pool = []
                 landmarks = generate_landmarks(seed)
                 stars = generate_starfield(seed)
                 freighters = generate_freighters(seed, landmarks)
@@ -805,6 +846,7 @@ def main():
                 rapid_time = player["rapid_time"]
                 boost_time = player.get("boost_time", 0.0)
                 boost_stock = player.get("boost_stock", 0)
+                shield_size_mult = 1.0
                 game_over = False
                 last_death_cause = None
                 discovered_planets = set(data.get("discovered_planets", []))
@@ -903,38 +945,39 @@ def main():
             cooldown = FIRE_COOLDOWN * rapid_multiplier
             if (keys[pygame.K_SPACE] or fire_button) and fire_timer <= 0.0:
                 bullet_vel = angle_to_vector(ship_angle) * BULLET_SPEED + ship_vel * 0.35
-                bullets.append(
-                    {
-                        "pos": pygame.Vector2(ship_pos),
-                        "prev": pygame.Vector2(ship_pos),
-                        "vel": bullet_vel,
-                        "ttl": BULLET_TTL,
-                    }
-                )
+                if bullet_pool:
+                    bullet = bullet_pool.pop()
+                    bullet["pos"].update(ship_pos)
+                    bullet["vel"].update(bullet_vel)
+                    bullet["ttl"] = BULLET_TTL
+                else:
+                    bullet = {"pos": pygame.Vector2(ship_pos), "vel": bullet_vel, "ttl": BULLET_TTL}
+                bullets.append(bullet)
                 fire_timer = cooldown
 
         shield_time = max(0.0, shield_time - dt)
+        if shield_time <= 0 and shield_size_mult != 1.0:
+            shield_size_mult = 1.0
         rapid_time = max(0.0, rapid_time - dt)
         boost_time = max(0.0, boost_time - dt)
 
         for i in range(len(bullets) - 1, -1, -1):
             bullet = bullets[i]
-            bullet["prev"] = pygame.Vector2(bullet["pos"])
             bullet["pos"] += bullet["vel"] * dt
             bullet["ttl"] -= dt
             if bullet["ttl"] <= 0:
                 bullets.pop(i)
+                bullet_pool.append(bullet)
 
         for i in range(len(enemy_bullets) - 1, -1, -1):
             bullet = enemy_bullets[i]
-            bullet["prev"] = pygame.Vector2(bullet["pos"])
             bullet["pos"] += bullet["vel"] * dt
             bullet["ttl"] -= dt
             if bullet["ttl"] <= 0:
                 enemy_bullets.pop(i)
+                enemy_bullet_pool.append(bullet)
 
         for asteroid in asteroids:
-            asteroid.prev = pygame.Vector2(asteroid.pos)
             asteroid.pos += asteroid.vel * dt
             asteroid.angle += asteroid.spin * dt
             if asteroid.pos.x < asteroid.radius:
@@ -949,6 +992,14 @@ def main():
             elif asteroid.pos.y > WORLD_HEIGHT - asteroid.radius:
                 asteroid.pos.y = WORLD_HEIGHT - asteroid.radius
                 asteroid.vel.y = -abs(asteroid.vel.y)
+
+        for i in range(len(damage_popups) - 1, -1, -1):
+            popup = damage_popups[i]
+            popup["pos"] += popup["vel"] * dt
+            popup["ttl"] -= dt
+            if popup["ttl"] <= 0:
+                damage_popups.pop(i)
+                damage_popup_pool.append(popup)
 
         enemy_spawn_timer -= dt
         if enemy_spawn_timer <= 0:
@@ -984,7 +1035,6 @@ def main():
                     asteroids.append(spawn_asteroid_near(rng, size, ship_pos))
 
         for enemy in enemies:
-            enemy.prev = pygame.Vector2(enemy.pos)
             to_player = ship_pos - enemy.pos
             dist_sq = to_player.length_squared()
             pursuing = dist_sq <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS
@@ -1025,14 +1075,14 @@ def main():
                 and enemy.fire_timer <= 0.0
             ):
                 bullet_vel = angle_to_vector(enemy.angle) * ENEMY_BULLET_SPEED + enemy.vel * 0.2
-                enemy_bullets.append(
-                    {
-                        "pos": pygame.Vector2(enemy.pos),
-                        "prev": pygame.Vector2(enemy.pos),
-                        "vel": bullet_vel,
-                        "ttl": ENEMY_BULLET_TTL,
-                    }
-                )
+                if enemy_bullet_pool:
+                    bullet = enemy_bullet_pool.pop()
+                    bullet["pos"].update(enemy.pos)
+                    bullet["vel"].update(bullet_vel)
+                    bullet["ttl"] = ENEMY_BULLET_TTL
+                else:
+                    bullet = {"pos": pygame.Vector2(enemy.pos), "vel": bullet_vel, "ttl": ENEMY_BULLET_TTL}
+                enemy_bullets.append(bullet)
                 enemy.fire_timer = ENEMY_FIRE_COOLDOWN
 
         for freighter in freighters:
@@ -1062,6 +1112,10 @@ def main():
                         last_death_cause = "asteroid"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
                         ship_vel = pygame.Vector2(0, 0)
+                        shield_time = 10.0
+                        shield_size_mult = 3.0
+                        rapid_time = 0.0
+                        boost_time = 0.0
                         if lives <= 0:
                             game_over = True
                         break
@@ -1076,9 +1130,13 @@ def main():
                                 last_death_cause = "planet"
                             ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
                             ship_vel = pygame.Vector2(0, 0)
+                            shield_time = 10.0
+                            shield_size_mult = 3.0
+                            rapid_time = 0.0
+                            boost_time = 0.0
                             if lives <= 0:
                                 game_over = True
-                            break
+                                break
 
             for pickup in pickups:
                 pickup_hit_radius = SHIP_RADIUS + PICKUP_RADIUS * 0.8
@@ -1095,19 +1153,46 @@ def main():
                     break
 
             for bullet in enemy_bullets[:]:
-                if moving_circle_hit(bullet["prev"], bullet["pos"], ship_prev, ship_pos, SHIP_RADIUS + 4):
+                bullet_prev = prev_pos(bullet["pos"], bullet["vel"], dt)
+                if moving_circle_hit(bullet_prev, bullet["pos"], ship_prev, ship_pos, SHIP_RADIUS + 4):
                     enemy_bullets.remove(bullet)
+                    enemy_bullet_pool.append(bullet)
                     if shield_time <= 0:
                         lives -= 1
                         last_death_cause = "enemy bullet"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
                         ship_vel = pygame.Vector2(0, 0)
+                        shield_time = 10.0
+                        shield_size_mult = 3.0
+                        rapid_time = 0.0
+                        boost_time = 0.0
                         if lives <= 0:
                             game_over = True
                     break
 
+            for bullet in enemy_bullets[:]:
+                bullet_prev = prev_pos(bullet["pos"], bullet["vel"], dt)
+                hit = None
+                for asteroid in asteroids:
+                    asteroid_prev = prev_pos(asteroid.pos, asteroid.vel, dt)
+                    radius = asteroid.radius + BULLET_HIT_SLOP
+                    if moving_circle_hit(bullet_prev, bullet["pos"], asteroid_prev, asteroid.pos, radius):
+                        hit = asteroid
+                        break
+                if hit:
+                    enemy_bullets.remove(bullet)
+                    enemy_bullet_pool.append(bullet)
+                    asteroids.remove(hit)
+                    if hit.size > 1:
+                        rng = random.Random(seed + int(hit.pos.x) + int(hit.pos.y))
+                        for _ in range(2):
+                            child = spawn_asteroid(rng, hit.size - 1, avoid_center=False)
+                            child.pos = pygame.Vector2(hit.pos)
+                            child.vel = hit.vel.rotate(rng.uniform(-50, 50)) * 1.2
+                            asteroids.append(child)
+
             for enemy in enemies:
-                enemy_prev = enemy.prev or enemy.pos
+                enemy_prev = prev_pos(enemy.pos, enemy.vel, dt)
                 hit_radius = ENEMY_RADIUS + SHIP_RADIUS
                 if moving_circle_hit(enemy_prev, enemy.pos, ship_prev, ship_pos, hit_radius):
                     if shield_time <= 0:
@@ -1115,12 +1200,16 @@ def main():
                         last_death_cause = "enemy ship"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
                         ship_vel = pygame.Vector2(0, 0)
+                        shield_time = 10.0
+                        shield_size_mult = 3.0
+                        rapid_time = 0.0
+                        boost_time = 0.0
                         if lives <= 0:
                             game_over = True
                     break
 
             for asteroid in asteroids[:]:
-                asteroid_prev = asteroid.prev or asteroid.pos
+                asteroid_prev = prev_pos(asteroid.pos, asteroid.vel, dt)
                 hit_radius = asteroid.radius + SHIP_RADIUS
                 if moving_circle_hit(ship_prev, ship_pos, asteroid_prev, asteroid.pos, hit_radius):
                     if shield_time <= 0:
@@ -1128,6 +1217,10 @@ def main():
                         last_death_cause = "asteroid"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
                         ship_vel = pygame.Vector2(0, 0)
+                        shield_time = 10.0
+                        shield_size_mult = 3.0
+                        rapid_time = 0.0
+                        boost_time = 0.0
                         if lives <= 0:
                             game_over = True
                     break
@@ -1135,50 +1228,95 @@ def main():
             for bullet in bullets[:]:
                 hit_enemy = None
                 for enemy in enemies:
-                    enemy_prev = enemy.prev or enemy.pos
-                    bullet_prev = bullet.get("prev", bullet["pos"])
+                    enemy_prev = prev_pos(enemy.pos, enemy.vel, dt)
+                    bullet_prev = prev_pos(bullet["pos"], bullet["vel"], dt)
                     radius = ENEMY_RADIUS + BULLET_HIT_SLOP
                     if moving_circle_hit(bullet_prev, bullet["pos"], enemy_prev, enemy.pos, radius):
                         hit_enemy = enemy
                         break
                 if hit_enemy:
                     bullets.remove(bullet)
+                    bullet_pool.append(bullet)
                     if hit_enemy.shield > 0:
                         hit_enemy.shield -= 1
+                        score += 20
+                        spawn_damage_popup(
+                            damage_popups,
+                            damage_popup_pool,
+                            popup_font,
+                            "20",
+                            hit_enemy.pos,
+                            COLORS["enemy_shield"],
+                        )
                     else:
                         enemies.remove(hit_enemy)
-                        score += 100
+                        score += 80
+                        spawn_damage_popup(
+                            damage_popups,
+                            damage_popup_pool,
+                            popup_font,
+                            "80",
+                            hit_enemy.pos,
+                            COLORS["enemy"],
+                        )
                     continue
 
                 hit_canister = None
                 for pickup in pickups:
                     if pickup.kind != "boost_canister":
                         continue
-                    bullet_prev = bullet.get("prev", bullet["pos"])
+                    bullet_prev = prev_pos(bullet["pos"], bullet["vel"], dt)
                     radius = CANISTER_RADIUS + BULLET_HIT_SLOP
                     if moving_circle_hit(bullet_prev, bullet["pos"], pickup.pos, pickup.pos, radius):
                         hit_canister = pickup
                         break
                 if hit_canister:
                     bullets.remove(bullet)
+                    bullet_pool.append(bullet)
                     hit_canister.shell_hp = max(0, hit_canister.shell_hp - 1)
                     if hit_canister.shell_hp <= 0:
                         hit_canister.kind = "boost"
                         hit_canister.shell_hp = 0
+                        spawn_damage_popup(
+                            damage_popups,
+                            damage_popup_pool,
+                            popup_font,
+                            "BOOST",
+                            hit_canister.pos,
+                            COLORS["pickup_boost"],
+                        )
+                    else:
+                        spawn_damage_popup(
+                            damage_popups,
+                            damage_popup_pool,
+                            popup_font,
+                            "1",
+                            hit_canister.pos,
+                            COLORS["pickup_canister"],
+                        )
                     continue
 
                 hit = None
                 for asteroid in asteroids:
-                    asteroid_prev = asteroid.prev or asteroid.pos
-                    bullet_prev = bullet.get("prev", bullet["pos"])
+                    asteroid_prev = prev_pos(asteroid.pos, asteroid.vel, dt)
+                    bullet_prev = prev_pos(bullet["pos"], bullet["vel"], dt)
                     radius = asteroid.radius + BULLET_HIT_SLOP
                     if moving_circle_hit(bullet_prev, bullet["pos"], asteroid_prev, asteroid.pos, radius):
                         hit = asteroid
                         break
                 if hit:
                     bullets.remove(bullet)
+                    bullet_pool.append(bullet)
                     asteroids.remove(hit)
-                    score += 10 * hit.size
+                    score += 10 * (5 - hit.size)
+                    spawn_damage_popup(
+                        damage_popups,
+                        damage_popup_pool,
+                        popup_font,
+                        str(10 * (5 - hit.size)),
+                        hit.pos,
+                        COLORS["bullet"],
+                    )
                     if hit.size > 1:
                         rng = random.Random(seed + score + int(hit.pos.x))
                         for _ in range(2):
@@ -1191,9 +1329,9 @@ def main():
             for enemy in enemies[:]:
                 if enemy.shield > 0:
                     continue
-                enemy_prev = enemy.prev or enemy.pos
+                enemy_prev = prev_pos(enemy.pos, enemy.vel, dt)
                 for asteroid in asteroids:
-                    asteroid_prev = asteroid.prev or asteroid.pos
+                    asteroid_prev = prev_pos(asteroid.pos, asteroid.vel, dt)
                     hit_radius = asteroid.radius + ENEMY_RADIUS
                     if moving_circle_hit(enemy_prev, enemy.pos, asteroid_prev, asteroid.pos, hit_radius):
                         enemies.remove(enemy)
@@ -1211,6 +1349,10 @@ def main():
                             last_death_cause = "planet"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
                         ship_vel = pygame.Vector2(0, 0)
+                        shield_time = 10.0
+                        shield_size_mult = 3.0
+                        rapid_time = 0.0
+                        boost_time = 0.0
                         if lives <= 0:
                             game_over = True
                     break
@@ -1223,7 +1365,7 @@ def main():
 
         for asteroid in asteroids[:]:
             for landmark in landmarks:
-                asteroid_prev = asteroid.prev or asteroid.pos
+                asteroid_prev = prev_pos(asteroid.pos, asteroid.vel, dt)
                 hit_radius = asteroid.radius + landmark["radius"]
                 if moving_circle_hit(asteroid_prev, asteroid.pos, landmark["pos"], landmark["pos"], hit_radius):
                     asteroids.remove(asteroid)
@@ -1359,9 +1501,9 @@ def main():
             pygame.draw.circle(screen, color, (int(screen_pos.x), int(screen_pos.y)), pickup_radius, 2)
             pygame.draw.circle(screen, color, (int(screen_pos.x), int(screen_pos.y)), core_radius, 0)
 
-        if shield_time > 0:
+        if shield_time > 0 and not game_over:
             shield_screen_pos = pygame.Vector2(WIDTH / 2, HEIGHT / 2)
-            shield_radius = SHIP_RADIUS * CAMERA_ZOOM + 10 * CAMERA_ZOOM
+            shield_radius = (SHIP_RADIUS * CAMERA_ZOOM + 10 * CAMERA_ZOOM) * shield_size_mult
             pygame.draw.circle(
                 screen,
                 COLORS["pickup_shield"],
@@ -1369,6 +1511,13 @@ def main():
                 max(1, int(shield_radius)),
                 1,
             )
+
+        for popup in damage_popups:
+            screen_pos = world_to_screen(popup["pos"], ship_pos)
+            alpha = int(255 * (popup["ttl"] / DAMAGE_POPUP_TTL))
+            surface = popup["surface"]
+            surface.set_alpha(max(0, min(255, alpha)))
+            screen.blit(surface, (screen_pos.x - surface.get_width() / 2, screen_pos.y - surface.get_height() / 2))
 
         ship_color = COLORS["warning"] if game_over else COLORS["ship"]
         if thrusting_render and not game_over:

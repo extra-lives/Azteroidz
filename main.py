@@ -658,6 +658,13 @@ def draw_freighter(surface, pos, angle, color):
         (nose, -half_w),
     ]
     draw_vector_shape(surface, pos, angle, points, color, 4)
+    cargo_radius = max(2, int(FREIGHTER_RADIUS * CAMERA_ZOOM * 0.18))
+    cargo_x = [-tail * 0.3, 0.0]
+    cargo_y = [-half_w * 0.25, half_w * 0.25]
+    for x in cargo_x:
+        for y in cargo_y:
+            cargo_pos = pos + pygame.Vector2(x, y).rotate(angle)
+            pygame.draw.circle(surface, color, (int(cargo_pos.x), int(cargo_pos.y)), cargo_radius, 1)
 
 
 def draw_edge_arrow(surface, direction, color):
@@ -693,7 +700,9 @@ def draw_thruster(surface, pos, angle, color, scale=1.0):
 def main():
     pygame.init()
     pygame.joystick.init()
-    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+    global WIDTH, HEIGHT
+    WIDTH, HEIGHT = screen.get_size()
     pygame.display.set_caption("Seeded Asteroids - Prototype")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("Consolas", 18)

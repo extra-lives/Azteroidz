@@ -89,6 +89,9 @@ DAMAGE_POPUP_TTL = 0.75
 DAMAGE_POPUP_SPEED = 85
 DAMAGE_POPUP_MAX = 35
 STOP_THRUSTER_TTL = 0.22
+ENEMY_SHARD_TTL = 1.2
+ENEMY_SHARD_SPEED = 90
+ENEMY_SHARD_MAX = 90
 BEACON_OFFSET_MIN = 120
 BEACON_OFFSET_MAX = 260
 
@@ -253,6 +256,35 @@ def draw_beacon(surface, pos, color):
     pygame.draw.polygon(surface, color, ring, 2)
     pygame.draw.circle(surface, color, (int(pos.x), int(pos.y)), 4, 1)
     pygame.draw.line(surface, color, (pos.x, pos.y - size - 6), (pos.x, pos.y + size + 6), 1)
+
+
+def spawn_enemy_shards(shards, pool, pos, angle):
+    if len(shards) >= ENEMY_SHARD_MAX:
+        return
+    base = [
+        pygame.Vector2(10, 0).rotate(angle),
+        pygame.Vector2(-8, -6).rotate(angle),
+        pygame.Vector2(-8, 6).rotate(angle),
+    ]
+    for i in range(3):
+        start = pos + base[i]
+        end = pos + base[(i + 1) % 3]
+        direction = (end - start).normalize()
+        drift = direction.rotate(random.uniform(-30, 30)) * random.uniform(ENEMY_SHARD_SPEED * 0.6, ENEMY_SHARD_SPEED)
+        if pool:
+            shard = pool.pop()
+            shard["start"].update(start)
+            shard["end"].update(end)
+            shard["vel"].update(drift)
+            shard["ttl"] = ENEMY_SHARD_TTL
+        else:
+            shard = {
+                "start": pygame.Vector2(start),
+                "end": pygame.Vector2(end),
+                "vel": drift,
+                "ttl": ENEMY_SHARD_TTL,
+            }
+        shards.append(shard)
 
 
 def seed_from_time():
@@ -760,6 +792,8 @@ def main():
     damage_popups = []
     damage_popup_pool = []
     beacons = {}
+    enemy_shards = []
+    enemy_shard_pool = []
     fire_timer = 0.0
     score = 0
     lives = 3
@@ -863,6 +897,8 @@ def main():
             damage_popups = []
             damage_popup_pool = []
             beacons = {}
+            enemy_shards = []
+            enemy_shard_pool = []
             ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
             ship_vel = pygame.Vector2(0, 0)
             ship_angle = -90
@@ -915,6 +951,8 @@ def main():
                 damage_popups = []
                 damage_popup_pool = []
                 beacons = {}
+                enemy_shards = []
+                enemy_shard_pool = []
                 landmarks = generate_landmarks(seed)
                 stars = generate_starfield(seed)
                 freighters = generate_freighters(seed, landmarks)
@@ -1064,6 +1102,15 @@ def main():
             if bullet["ttl"] <= 0:
                 enemy_bullets.pop(i)
                 enemy_bullet_pool.append(bullet)
+
+        for i in range(len(enemy_shards) - 1, -1, -1):
+            shard = enemy_shards[i]
+            shard["start"] += shard["vel"] * dt
+            shard["end"] += shard["vel"] * dt
+            shard["ttl"] -= dt
+            if shard["ttl"] <= 0:
+                enemy_shards.pop(i)
+                enemy_shard_pool.append(shard)
 
         for asteroid in asteroids:
             asteroid.pos += asteroid.vel * dt
@@ -1339,6 +1386,7 @@ def main():
                     else:
                         enemies.remove(hit_enemy)
                         score += 80
+                        spawn_enemy_shards(enemy_shards, enemy_shard_pool, hit_enemy.pos, hit_enemy.angle)
                         spawn_damage_popup(
                             damage_popups,
                             damage_popup_pool,
@@ -1559,7 +1607,7 @@ def main():
         for enemy in enemies:
             screen_pos = world_to_screen(enemy.pos, ship_pos)
             if enemy.shield > 0:
-                shield_radius = (ENEMY_RADIUS + 8) * CAMERA_ZOOM
+                shield_radius = (ENEMY_RADIUS + 8) * CAMERA_ZOOM * 1.2
                 pygame.draw.circle(
                     screen,
                     COLORS["enemy_shield"],
@@ -1607,7 +1655,7 @@ def main():
 
         if shield_time > 0 and not game_over:
             shield_screen_pos = pygame.Vector2(WIDTH / 2, HEIGHT / 2)
-            shield_radius = (SHIP_RADIUS * CAMERA_ZOOM + 10 * CAMERA_ZOOM) * shield_size_mult
+            shield_radius = (SHIP_RADIUS * CAMERA_ZOOM + 10 * CAMERA_ZOOM) * shield_size_mult * 1.2
             pygame.draw.circle(
                 screen,
                 COLORS["pickup_shield"],
@@ -1622,6 +1670,13 @@ def main():
             surface = popup["surface"]
             surface.set_alpha(max(0, min(255, alpha)))
             screen.blit(surface, (screen_pos.x - surface.get_width() / 2, screen_pos.y - surface.get_height() / 2))
+
+        for shard in enemy_shards:
+            alpha = shard["ttl"] / ENEMY_SHARD_TTL
+            color = scale_color(COLORS["enemy"], alpha)
+            start = world_to_screen(shard["start"], ship_pos)
+            end = world_to_screen(shard["end"], ship_pos)
+            pygame.draw.line(screen, color, start, end, 2)
 
         ship_color = COLORS["warning"] if game_over else COLORS["ship"]
         if thrusting_render and not game_over:

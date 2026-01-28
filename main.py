@@ -70,6 +70,9 @@ CANISTER_HITS = 4
 BOOST_MULTIPLIER = 1.5
 BOOST_TIME = 3.0
 STAR_COUNT = 500
+FREIGHTER_COUNT = 10
+FREIGHTER_SPEED = (70, 110)
+FREIGHTER_RADIUS = SHIP_RADIUS * 4
 JOY_AXIS_X = 0
 JOY_AXIS_Y = 4
 JOY_AXIS_DEADZONE = 0.5
@@ -85,9 +88,12 @@ COLORS = {
     "pickup_shield": (120, 200, 255),
     "pickup_rapid": (255, 190, 120),
     "pickup_boost": (255, 170, 90),
-    "pickup_canister": (255, 170, 90),
+    "pickup_canister": (170, 90, 220),
+    "pickup_boost": (170, 90, 220),
     "enemy": (235, 90, 90),
     "enemy_shield": (255, 140, 140),
+    "freighter": (150, 110, 80),
+    "freighter_shield": (120, 160, 200),
     "ui": (200, 200, 200),
     "warning": (255, 140, 140),
 }
@@ -95,6 +101,13 @@ COLORS = {
 
 def wrap_position(pos):
     return pygame.Vector2(pos.x % WORLD_WIDTH, pos.y % WORLD_HEIGHT)
+
+
+def clamp_position(pos, radius=0):
+    return pygame.Vector2(
+        max(radius, min(WORLD_WIDTH - radius, pos.x)),
+        max(radius, min(WORLD_HEIGHT - radius, pos.y)),
+    )
 
 
 def world_to_screen(world_pos, camera_pos):
@@ -270,13 +283,24 @@ def generate_landmarks(seed):
             )
             planet_id += 1
     landmarks.extend(planets)
+    moon_id = 0
     for parent in planets:
         size = rng.randint(int(parent["radius"] * 0.16), int(parent["radius"] * 0.4))
         min_orbit = parent["radius"] + size + 120
         max_orbit = parent["radius"] + size + 520
         offset = pygame.Vector2(rng.uniform(min_orbit, max_orbit), 0).rotate(rng.uniform(0, 360))
-        moon_pos = wrap_position(parent["pos"] + offset)
-        landmarks.append({"kind": "moon", "pos": moon_pos, "radius": size, "color": COLORS["moon"]})
+        moon_pos = clamp_position(parent["pos"] + offset, radius=size)
+        landmarks.append(
+            {
+                "id": moon_id,
+                "kind": "moon",
+                "pos": moon_pos,
+                "radius": size,
+                "color": COLORS["moon"],
+                "parent_id": parent["id"],
+            }
+        )
+        moon_id += 1
     return landmarks
 
 
@@ -321,6 +345,46 @@ def generate_starfield(seed):
     return stars
 
 
+def pick_nearest_moon(planet, moons):
+    best = None
+    best_dist_sq = None
+    for moon in moons:
+        dist_sq = (moon["pos"] - planet["pos"]).length_squared()
+        if best_dist_sq is None or dist_sq < best_dist_sq:
+            best_dist_sq = dist_sq
+            best = moon
+    return best
+
+
+def generate_freighters(seed, landmarks):
+    rng = random.Random(seed ^ 0x7F4A7C15)
+    planets = [l for l in landmarks if l["kind"] == "planet"]
+    moons = [l for l in landmarks if l["kind"] == "moon"]
+    if len(planets) < 2 or len(moons) < 2:
+        return []
+    freighters = []
+    for _ in range(FREIGHTER_COUNT):
+        origin, dest = rng.sample(planets, 2)
+        origin_moon = pick_nearest_moon(origin, moons)
+        dest_moon = pick_nearest_moon(dest, moons)
+        if not origin_moon or not dest_moon:
+            continue
+        pos = pygame.Vector2(origin_moon["pos"])
+        speed = rng.uniform(*FREIGHTER_SPEED)
+        freighters.append(
+            {
+                "pos": pos,
+                "vel": pygame.Vector2(0, 0),
+                "angle": rng.uniform(0, 360),
+                "from": pygame.Vector2(origin_moon["pos"]),
+                "to": pygame.Vector2(dest_moon["pos"]),
+                "target": pygame.Vector2(dest_moon["pos"]),
+                "speed": speed,
+            }
+        )
+    return freighters
+
+
 def new_world(seed):
     rng = random.Random(seed)
     asteroids = []
@@ -331,7 +395,8 @@ def new_world(seed):
     enemies = generate_enemies(seed)
     landmarks = generate_landmarks(seed)
     stars = generate_starfield(seed)
-    return asteroids, pickups, enemies, landmarks, stars
+    freighters = generate_freighters(seed, landmarks)
+    return asteroids, pickups, enemies, landmarks, stars, freighters
 
 
 def load_state():
@@ -438,6 +503,22 @@ def draw_ship(surface, pos, angle, color):
     pygame.draw.lines(surface, color, True, points, 2)
 
 
+def draw_freighter(surface, pos, angle, color):
+    length = FREIGHTER_RADIUS * CAMERA_ZOOM * 2.2
+    half_w = FREIGHTER_RADIUS * CAMERA_ZOOM * 0.8
+    nose = FREIGHTER_RADIUS * CAMERA_ZOOM * 0.5
+    tail = FREIGHTER_RADIUS * CAMERA_ZOOM * 1.1
+    points = [
+        (length * 0.5, 0),
+        (nose, half_w),
+        (-tail, half_w * 0.8),
+        (-length * 0.5, 0),
+        (-tail, -half_w * 0.8),
+        (nose, -half_w),
+    ]
+    draw_vector_shape(surface, pos, angle, points, color, 4)
+
+
 def draw_edge_arrow(surface, direction, color):
     if direction.length_squared() == 0:
         return
@@ -491,7 +572,7 @@ def main():
         joy_hats = joystick.get_numhats()
 
     seed = seed_from_time()
-    asteroids, pickups, enemies, landmarks, stars = new_world(seed)
+    asteroids, pickups, enemies, landmarks, stars, freighters = new_world(seed)
 
     ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
     ship_vel = pygame.Vector2(0, 0)
@@ -503,6 +584,7 @@ def main():
     score = 0
     lives = 3
     game_over = False
+    last_death_cause = None
 
     shield_time = 0.0
     shield_stock = 0
@@ -554,20 +636,25 @@ def main():
             map_scale_y = map_rect.height / WORLD_HEIGHT
             map_scale = min(map_scale_x, map_scale_y)
             for landmark in landmarks:
-                if landmark.get("kind") != "planet":
-                    continue
-                if landmark.get("id") not in discovered_planets:
+                kind = landmark.get("kind")
+                if kind == "planet":
+                    if landmark.get("id") not in discovered_planets:
+                        continue
+                    color = COLORS["planet"]
+                elif kind == "moon":
+                    if landmark.get("parent_id") not in discovered_planets:
+                        continue
+                    color = COLORS["moon"]
+                else:
                     continue
                 map_x = map_rect.x + (landmark["pos"].x / WORLD_WIDTH) * map_rect.width
                 map_y = map_rect.y + (landmark["pos"].y / WORLD_HEIGHT) * map_rect.height
                 map_radius = max(1, int(landmark["radius"] * map_scale))
-                pygame.draw.circle(
-                    screen,
-                    COLORS["planet"],
-                    (int(map_x), int(map_y)),
-                    map_radius,
-                    1,
-                )
+                pygame.draw.circle(screen, color, (int(map_x), int(map_y)), map_radius, 1)
+            for freighter in freighters:
+                map_x = map_rect.x + (freighter["pos"].x / WORLD_WIDTH) * map_rect.width
+                map_y = map_rect.y + (freighter["pos"].y / WORLD_HEIGHT) * map_rect.height
+                pygame.draw.circle(screen, COLORS["freighter"], (int(map_x), int(map_y)), 3, 0)
             map_x = map_rect.x + (ship_pos.x / WORLD_WIDTH) * map_rect.width
             map_y = map_rect.y + (ship_pos.y / WORLD_HEIGHT) * map_rect.height
             pygame.draw.circle(screen, COLORS["pickup_shield"], (int(map_x), int(map_y)), 5, 0)
@@ -578,7 +665,7 @@ def main():
 
         if keys[pygame.K_n]:
             seed = seed_from_time()
-            asteroids, pickups, enemies, landmarks, stars = new_world(seed)
+            asteroids, pickups, enemies, landmarks, stars, freighters = new_world(seed)
             bullets = []
             enemy_bullets = []
             ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
@@ -592,6 +679,7 @@ def main():
             boost_time = 0.0
             boost_stock = 0
             game_over = False
+            last_death_cause = None
             discovered_planets = set()
 
         if keys[pygame.K_F5]:
@@ -632,6 +720,7 @@ def main():
                         enemies.append(spawn_enemy(rng))
                 landmarks = generate_landmarks(seed)
                 stars = generate_starfield(seed)
+                freighters = generate_freighters(seed, landmarks)
                 player = data["player"]
                 ship_pos = deserialize_vec(player["pos"])
                 ship_vel = deserialize_vec(player["vel"])
@@ -644,6 +733,7 @@ def main():
                 boost_time = player.get("boost_time", 0.0)
                 boost_stock = player.get("boost_stock", 0)
                 game_over = False
+                last_death_cause = None
                 discovered_planets = set(data.get("discovered_planets", []))
 
         if not game_over:
@@ -750,24 +840,38 @@ def main():
         rapid_time = max(0.0, rapid_time - dt)
         boost_time = max(0.0, boost_time - dt)
 
-        for bullet in bullets[:]:
+        for i in range(len(bullets) - 1, -1, -1):
+            bullet = bullets[i]
             bullet["prev"] = pygame.Vector2(bullet["pos"])
             bullet["pos"] += bullet["vel"] * dt
             bullet["ttl"] -= dt
             if bullet["ttl"] <= 0:
-                bullets.remove(bullet)
+                bullets.pop(i)
 
-        for bullet in enemy_bullets[:]:
+        for i in range(len(enemy_bullets) - 1, -1, -1):
+            bullet = enemy_bullets[i]
             bullet["prev"] = pygame.Vector2(bullet["pos"])
             bullet["pos"] += bullet["vel"] * dt
             bullet["ttl"] -= dt
             if bullet["ttl"] <= 0:
-                enemy_bullets.remove(bullet)
+                enemy_bullets.pop(i)
 
         for asteroid in asteroids:
             asteroid["prev"] = pygame.Vector2(asteroid["pos"])
             asteroid["pos"] += asteroid["vel"] * dt
             asteroid["angle"] += asteroid["spin"] * dt
+            if asteroid["pos"].x < asteroid["radius"]:
+                asteroid["pos"].x = asteroid["radius"]
+                asteroid["vel"].x = abs(asteroid["vel"].x)
+            elif asteroid["pos"].x > WORLD_WIDTH - asteroid["radius"]:
+                asteroid["pos"].x = WORLD_WIDTH - asteroid["radius"]
+                asteroid["vel"].x = -abs(asteroid["vel"].x)
+            if asteroid["pos"].y < asteroid["radius"]:
+                asteroid["pos"].y = asteroid["radius"]
+                asteroid["vel"].y = abs(asteroid["vel"].y)
+            elif asteroid["pos"].y > WORLD_HEIGHT - asteroid["radius"]:
+                asteroid["pos"].y = WORLD_HEIGHT - asteroid["radius"]
+                asteroid["vel"].y = -abs(asteroid["vel"].y)
 
         asteroid_spawn_timer -= dt
         if asteroid_spawn_timer <= 0:
@@ -786,7 +890,7 @@ def main():
 
         for enemy in enemies:
             enemy["prev"] = pygame.Vector2(enemy["pos"])
-            to_player = toroidal_delta_world(enemy["pos"], ship_pos)
+            to_player = ship_pos - enemy["pos"]
             dist_sq = to_player.length_squared()
             pursuing = dist_sq <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS
             if pursuing and dist_sq > 0:
@@ -802,7 +906,23 @@ def main():
                 speed = ENEMY_SCOUT_SPEED
 
             enemy["vel"] = angle_to_vector(enemy["angle"]) * speed
-            enemy["pos"] = wrap_position(enemy["pos"] + enemy["vel"] * dt)
+            enemy["pos"] = enemy["pos"] + enemy["vel"] * dt
+            if enemy["pos"].x < ENEMY_RADIUS:
+                enemy["pos"].x = ENEMY_RADIUS
+                enemy["vel"].x = abs(enemy["vel"].x)
+                enemy["angle"] = vector_to_angle(enemy["vel"])
+            elif enemy["pos"].x > WORLD_WIDTH - ENEMY_RADIUS:
+                enemy["pos"].x = WORLD_WIDTH - ENEMY_RADIUS
+                enemy["vel"].x = -abs(enemy["vel"].x)
+                enemy["angle"] = vector_to_angle(enemy["vel"])
+            if enemy["pos"].y < ENEMY_RADIUS:
+                enemy["pos"].y = ENEMY_RADIUS
+                enemy["vel"].y = abs(enemy["vel"].y)
+                enemy["angle"] = vector_to_angle(enemy["vel"])
+            elif enemy["pos"].y > WORLD_HEIGHT - ENEMY_RADIUS:
+                enemy["pos"].y = WORLD_HEIGHT - ENEMY_RADIUS
+                enemy["vel"].y = -abs(enemy["vel"].y)
+                enemy["angle"] = vector_to_angle(enemy["vel"])
             enemy["fire_timer"] = max(0.0, enemy["fire_timer"] - dt)
             if (
                 pursuing
@@ -820,6 +940,22 @@ def main():
                 )
                 enemy["fire_timer"] = ENEMY_FIRE_COOLDOWN
 
+        for freighter in freighters:
+            to_target = freighter["target"] - freighter["pos"]
+            dist_sq = to_target.length_squared()
+            if dist_sq <= 160 * 160:
+                if freighter["target"] == freighter["to"]:
+                    freighter["target"] = pygame.Vector2(freighter["from"])
+                else:
+                    freighter["target"] = pygame.Vector2(freighter["to"])
+                to_target = freighter["target"] - freighter["pos"]
+            if to_target.length_squared() > 0:
+                freighter["angle"] = vector_to_angle(to_target)
+                freighter["vel"] = to_target.normalize() * freighter["speed"]
+            else:
+                freighter["vel"] = pygame.Vector2(0, 0)
+            freighter["pos"] = freighter["pos"] + freighter["vel"] * dt
+
         # Pickups persist until collected.
 
         if not game_over:
@@ -828,6 +964,7 @@ def main():
                     hit_radius = asteroid["radius"] + SHIP_RADIUS
                     if moving_circle_hit(ship_pos, ship_pos, asteroid["pos"], asteroid["pos"], hit_radius):
                         lives -= 1
+                        last_death_cause = "asteroid"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
                         ship_vel = pygame.Vector2(0, 0)
                         if lives <= 0:
@@ -838,6 +975,10 @@ def main():
                         hit_radius = landmark["radius"] + SHIP_RADIUS
                         if moving_circle_hit(ship_pos, ship_pos, landmark["pos"], landmark["pos"], hit_radius):
                             lives -= 1
+                            if landmark.get("kind") == "moon":
+                                last_death_cause = "moon"
+                            else:
+                                last_death_cause = "planet"
                             ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
                             ship_vel = pygame.Vector2(0, 0)
                             if lives <= 0:
@@ -862,6 +1003,7 @@ def main():
                     enemy_bullets.remove(bullet)
                     if shield_time <= 0:
                         lives -= 1
+                        last_death_cause = "enemy bullet"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
                         ship_vel = pygame.Vector2(0, 0)
                         if lives <= 0:
@@ -874,6 +1016,7 @@ def main():
                 if moving_circle_hit(enemy_prev, enemy["pos"], ship_prev, ship_pos, hit_radius):
                     if shield_time <= 0:
                         lives -= 1
+                        last_death_cause = "enemy ship"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
                         ship_vel = pygame.Vector2(0, 0)
                         if lives <= 0:
@@ -886,6 +1029,7 @@ def main():
                 if moving_circle_hit(ship_prev, ship_pos, asteroid_prev, asteroid["pos"], hit_radius):
                     if shield_time <= 0:
                         lives -= 1
+                        last_death_cause = "asteroid"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
                         ship_vel = pygame.Vector2(0, 0)
                         if lives <= 0:
@@ -965,6 +1109,10 @@ def main():
                 if moving_circle_hit(ship_prev, ship_pos, landmark["pos"], landmark["pos"], hit_radius):
                     if shield_time <= 0:
                         lives -= 1
+                        if landmark.get("kind") == "moon":
+                            last_death_cause = "moon"
+                        else:
+                            last_death_cause = "planet"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
                         ship_vel = pygame.Vector2(0, 0)
                         if lives <= 0:
@@ -1079,6 +1227,18 @@ def main():
                 )
             draw_ship(screen, screen_pos, enemy["angle"], COLORS["enemy"])
 
+        for freighter in freighters:
+            screen_pos = world_to_screen(freighter["pos"], ship_pos)
+            shield_radius = (FREIGHTER_RADIUS + 14) * CAMERA_ZOOM
+            pygame.draw.circle(
+                screen,
+                COLORS["freighter_shield"],
+                (int(screen_pos.x), int(screen_pos.y)),
+                max(1, int(shield_radius)),
+                1,
+            )
+            draw_freighter(screen, screen_pos, freighter["angle"], COLORS["freighter"])
+
         for pickup in pickups:
             screen_pos = world_to_screen(pickup["pos"], ship_pos)
             if pickup["kind"] == "boost_canister":
@@ -1168,6 +1328,8 @@ def main():
             f"Boost Stock: {boost_stock}",
             f"Enemies: {len(enemies)}",
         ]
+        if show_gamepad_debug:
+            hud.append(f"Last Death: {last_death_cause}" if last_death_cause else "Last Death: -")
         for i, line in enumerate(hud):
             text = font.render(line, True, COLORS["ui"])
             screen.blit(text, (10, 10 + i * 20))
@@ -1177,7 +1339,11 @@ def main():
         screen.blit(text, (10, HEIGHT - 28))
 
         if game_over:
-            msg = font.render("Game Over - press N for new seed", True, COLORS["warning"])
+            if last_death_cause:
+                msg_text = f"Game Over - {last_death_cause} - press N for new seed"
+            else:
+                msg_text = "Game Over - press N for new seed"
+            msg = font.render(msg_text, True, COLORS["warning"])
             screen.blit(msg, (WIDTH / 2 - msg.get_width() / 2, HEIGHT / 2))
 
         pygame.display.flip()

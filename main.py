@@ -145,6 +145,7 @@ class Enemy:
     fire_timer: float
     wander_timer: float
     wander_angle: float
+    pursuing: bool = False
 
 
 @dataclass(slots=True)
@@ -661,6 +662,7 @@ def deserialize_enemy(data):
         fire_timer=data.get("fire_timer", 0.0),
         wander_timer=data.get("wander_timer", 0.0),
         wander_angle=data.get("wander_angle", angle),
+        pursuing=False,
     )
 
 
@@ -1173,6 +1175,7 @@ def main():
             to_player = ship_pos - enemy.pos
             dist_sq = to_player.length_squared()
             pursuing = dist_sq <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS
+            enemy.pursuing = pursuing
             if pursuing and dist_sq > 0:
                 target_angle = vector_to_angle(to_player)
                 enemy.angle = turn_towards(enemy.angle, target_angle, ENEMY_TURN_SPEED * dt)
@@ -1615,6 +1618,8 @@ def main():
                     max(1, int(shield_radius)),
                     1,
                 )
+            if enemy.pursuing:
+                draw_thruster(screen, screen_pos, enemy.angle, COLORS["enemy"], 0.7)
             draw_ship(screen, screen_pos, enemy.angle, COLORS["enemy"])
 
         for freighter in freighters:

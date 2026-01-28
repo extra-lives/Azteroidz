@@ -57,7 +57,7 @@ ENEMY_RADIUS = 12
 ENEMY_SCOUT_SPEED = 120
 ENEMY_PURSUE_SPEED = 140
 ENEMY_TURN_SPEED = 110
-ENEMY_PURSUE_RADIUS = 450
+ENEMY_PURSUE_RADIUS = 550
 ENEMY_FIRE_RANGE = 300
 ENEMY_FIRE_COOLDOWN = 1.4
 ENEMY_BULLET_SPEED = 400
@@ -88,6 +88,8 @@ JOY_AXIS_DEADZONE = 0.5
 DAMAGE_POPUP_TTL = 0.75
 DAMAGE_POPUP_SPEED = 85
 DAMAGE_POPUP_MAX = 35
+BEACON_OFFSET_MIN = 120
+BEACON_OFFSET_MAX = 260
 
 
 COLORS = {
@@ -223,6 +225,25 @@ def spawn_damage_popup(popups, pool, font, text, world_pos, color):
             "surface": surface,
         }
     popups.append(popup)
+
+
+def make_beacon_id(rng):
+    letters = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+    digits = "23456789"
+    part_a = "".join(rng.choice(letters) for _ in range(2))
+    part_b = "".join(rng.choice(digits) for _ in range(2))
+    return f"{part_a}-{part_b}"
+
+
+def draw_beacon(surface, pos, color):
+    size = 12
+    ring = []
+    for i in range(6):
+        angle = math.radians(60 * i + 30)
+        ring.append((pos.x + math.cos(angle) * size, pos.y + math.sin(angle) * size))
+    pygame.draw.polygon(surface, color, ring, 2)
+    pygame.draw.circle(surface, color, (int(pos.x), int(pos.y)), 4, 1)
+    pygame.draw.line(surface, color, (pos.x, pos.y - size - 6), (pos.x, pos.y + size + 6), 1)
 
 
 def seed_from_time():
@@ -468,12 +489,20 @@ def generate_freighters(seed, landmarks):
     if len(planets) < 2 or len(moons) < 2:
         return []
     freighters = []
-    for _ in range(FREIGHTER_COUNT):
+    used_pairs = set()
+    attempts = 0
+    max_attempts = FREIGHTER_COUNT * 12
+    while len(freighters) < FREIGHTER_COUNT and attempts < max_attempts:
+        attempts += 1
         origin, dest = rng.sample(planets, 2)
         origin_moon = pick_nearest_moon(origin, moons)
         dest_moon = pick_nearest_moon(dest, moons)
         if not origin_moon or not dest_moon:
             continue
+        pair = tuple(sorted((origin_moon.id, dest_moon.id)))
+        if pair in used_pairs:
+            continue
+        used_pairs.add(pair)
         pos = pygame.Vector2(origin_moon.pos)
         speed = rng.uniform(*FREIGHTER_SPEED)
         freighters.append(
@@ -697,6 +726,7 @@ def main():
     enemy_bullet_pool = []
     damage_popups = []
     damage_popup_pool = []
+    beacons = {}
     fire_timer = 0.0
     score = 0
     lives = 3
@@ -771,6 +801,10 @@ def main():
                 map_y = map_rect.y + (landmark.pos.y / WORLD_HEIGHT) * map_rect.height
                 map_radius = max(1, int(landmark.radius * map_scale))
                 pygame.draw.circle(screen, color, (int(map_x), int(map_y)), map_radius, 1)
+                if kind == "planet" and landmark.id in beacons:
+                    beacon = beacons[landmark.id]
+                    label = font.render(beacon["code"], True, COLORS["ui"])
+                    screen.blit(label, (map_x + 6, map_y - 6))
             for freighter in freighters:
                 map_x = map_rect.x + (freighter["pos"].x / WORLD_WIDTH) * map_rect.width
                 map_y = map_rect.y + (freighter["pos"].y / WORLD_HEIGHT) * map_rect.height
@@ -792,6 +826,7 @@ def main():
             enemy_bullet_pool = []
             damage_popups = []
             damage_popup_pool = []
+            beacons = {}
             ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
             ship_vel = pygame.Vector2(0, 0)
             ship_angle = -90
@@ -843,6 +878,7 @@ def main():
                 enemy_bullet_pool = []
                 damage_popups = []
                 damage_popup_pool = []
+                beacons = {}
                 landmarks = generate_landmarks(seed)
                 stars = generate_starfield(seed)
                 freighters = generate_freighters(seed, landmarks)
@@ -1434,7 +1470,23 @@ def main():
                     and -draw_radius <= screen_pos.y <= HEIGHT + draw_radius
                 )
                 if on_screen:
+                    if landmark.id not in beacons:
+                        rng = random.Random(seed + landmark.id * 7919)
+                        offset = pygame.Vector2(
+                            rng.uniform(landmark.radius + BEACON_OFFSET_MIN, landmark.radius + BEACON_OFFSET_MAX), 0
+                        ).rotate(rng.uniform(0, 360))
+                        beacon_pos = clamp_position(landmark.pos + offset)
+                        beacons[landmark.id] = {
+                            "pos": beacon_pos,
+                            "code": make_beacon_id(rng),
+                        }
                     discovered_planets.add(landmark.id)
+
+        for planet_id, beacon in beacons.items():
+            screen_pos = world_to_screen(beacon["pos"], ship_pos)
+            draw_beacon(screen, screen_pos, COLORS["pickup_shield"])
+            label = font.render(beacon["code"], True, COLORS["ui"])
+            screen.blit(label, (screen_pos.x + 18, screen_pos.y - 10))
 
         for asteroid in asteroids:
             screen_pos = world_to_screen(asteroid.pos, ship_pos)

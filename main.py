@@ -88,6 +88,7 @@ JOY_AXIS_DEADZONE = 0.5
 DAMAGE_POPUP_TTL = 0.75
 DAMAGE_POPUP_SPEED = 85
 DAMAGE_POPUP_MAX = 35
+STOP_THRUSTER_TTL = 0.22
 BEACON_OFFSET_MIN = 120
 BEACON_OFFSET_MAX = 260
 
@@ -233,6 +234,14 @@ def make_beacon_id(rng):
     part_a = "".join(rng.choice(letters) for _ in range(2))
     part_b = "".join(rng.choice(digits) for _ in range(2))
     return f"{part_a}-{part_b}"
+
+
+def scale_color(color, alpha):
+    return (
+        max(0, min(255, int(color[0] * alpha))),
+        max(0, min(255, int(color[1] * alpha))),
+        max(0, min(255, int(color[2] * alpha))),
+    )
 
 
 def draw_beacon(surface, pos, color):
@@ -697,6 +706,21 @@ def draw_thruster(surface, pos, angle, color, scale=1.0):
         pygame.draw.line(surface, color, start, end, 2)
 
 
+def draw_stop_thruster(surface, pos, angle, color):
+    render_radius = SHIP_RADIUS * CAMERA_ZOOM
+    side = pygame.Vector2(0, render_radius * 1.35).rotate(angle)
+    forward = pygame.Vector2(render_radius * 1.1, 0).rotate(angle)
+    lengths = [render_radius * 0.75, render_radius * 0.5]
+    offsets = [0.0, render_radius * 0.2]
+    for length, offset in zip(lengths, offsets):
+        left_start = pos - side + forward * offset
+        right_start = pos + side + forward * offset
+        left_end = left_start - side.normalize() * length
+        right_end = right_start + side.normalize() * length
+        pygame.draw.line(surface, color, left_start, left_end, 2)
+        pygame.draw.line(surface, color, right_start, right_end, 2)
+
+
 def main():
     pygame.init()
     pygame.joystick.init()
@@ -751,6 +775,9 @@ def main():
     asteroid_spawn_timer = 0.0
     enemy_spawn_timer = 0.0
     thrusting_render = False
+    stopping_render = False
+    stop_thruster_timer = 0.0
+    stop_thruster_held = False
     show_map = False
     discovered_planets = set()
 
@@ -962,9 +989,13 @@ def main():
                     thrusting = True
                 if axis_y > JOY_AXIS_DEADZONE:
                     reversing = True
-            thrusting_render = thrusting
             if stop_button:
                 stopping = True
+            thrusting_render = thrusting
+            stopping_render = stopping
+            if stopping_render and not stop_thruster_held:
+                stop_thruster_timer = STOP_THRUSTER_TTL
+            stop_thruster_held = stopping_render
 
             boost_multiplier = BOOST_MULTIPLIER if boost_time > 0 else 1.0
             ship_angle += turn * SHIP_TURN_SPEED * dt
@@ -1016,6 +1047,7 @@ def main():
             shield_size_mult = 1.0
         rapid_time = max(0.0, rapid_time - dt)
         boost_time = max(0.0, boost_time - dt)
+        stop_thruster_timer = max(0.0, stop_thruster_timer - dt)
 
         for i in range(len(bullets) - 1, -1, -1):
             bullet = bullets[i]
@@ -1600,6 +1632,14 @@ def main():
                 ship_angle,
                 COLORS["pickup_rapid"],
                 thruster_scale,
+            )
+        if stop_thruster_timer > 0 and not game_over:
+            alpha = stop_thruster_timer / STOP_THRUSTER_TTL
+            draw_stop_thruster(
+                screen,
+                pygame.Vector2(WIDTH / 2, HEIGHT / 2),
+                ship_angle,
+                scale_color(COLORS["pickup_boost"], alpha),
             )
         draw_ship(screen, pygame.Vector2(WIDTH / 2, HEIGHT / 2), ship_angle, ship_color)
 

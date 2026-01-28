@@ -3,6 +3,8 @@ import math
 import os
 import random
 import time
+from dataclasses import dataclass
+from typing import Optional
 
 import pygame
 
@@ -50,7 +52,6 @@ ASTEROID_SPAWN_BUFFER = 220
 ASTEROID_SPAWN_INTERVAL = 1.2
 ASTEROID_OFFSCREEN_MARGIN = 220
 
-ENEMY_COUNT = 1000
 ENEMY_RADIUS = 12
 ENEMY_SCOUT_SPEED = 120
 ENEMY_PURSUE_SPEED = 140
@@ -61,6 +62,13 @@ ENEMY_FIRE_COOLDOWN = 1.4
 ENEMY_BULLET_SPEED = 400
 ENEMY_BULLET_TTL = 4.0
 ENEMY_SHIELD_HITS = 1
+ENEMY_NEARBY_TARGET = 25
+ENEMY_NEARBY_RADIUS = 3000
+ENEMY_SPAWN_RADIUS = 3200
+ENEMY_SPAWN_BUFFER = 1400
+ENEMY_OFFSCREEN_MARGIN = 240
+ENEMY_DESPAWN_RADIUS = 5200
+ENEMY_SPAWN_INTERVAL = 2.4
 
 PICKUP_TTL = 15.0
 PICKUP_GRID_SPACING = 1.25
@@ -97,6 +105,38 @@ COLORS = {
     "ui": (200, 200, 200),
     "warning": (255, 140, 140),
 }
+
+
+@dataclass(slots=True)
+class Asteroid:
+    pos: pygame.Vector2
+    vel: pygame.Vector2
+    size: int
+    radius: int
+    spin: float
+    angle: float
+    shape: list
+    prev: Optional[pygame.Vector2] = None
+
+
+@dataclass(slots=True)
+class Pickup:
+    kind: str
+    pos: pygame.Vector2
+    ttl: float
+    shell_hp: int = 0
+
+
+@dataclass(slots=True)
+class Enemy:
+    pos: pygame.Vector2
+    vel: pygame.Vector2
+    angle: float
+    shield: int
+    fire_timer: float
+    wander_timer: float
+    wander_angle: float
+    prev: Optional[pygame.Vector2] = None
 
 
 def wrap_position(pos):
@@ -177,15 +217,15 @@ def spawn_asteroid(rng, size, avoid_center=True):
     velocity = angle_to_vector(rng.uniform(0, 360)) * rng.uniform(speed_min, speed_max)
     spin = rng.uniform(-40, 40)
     shape = make_asteroid_shape(rng, radius)
-    return {
-        "pos": pos,
-        "vel": velocity,
-        "size": size,
-        "radius": radius,
-        "spin": spin,
-        "angle": rng.uniform(0, 360),
-        "shape": shape,
-    }
+    return Asteroid(
+        pos=pos,
+        vel=velocity,
+        size=size,
+        radius=radius,
+        spin=spin,
+        angle=rng.uniform(0, 360),
+        shape=shape,
+    )
 
 
 def spawn_asteroid_near(rng, size, center):
@@ -202,10 +242,10 @@ def spawn_asteroid_near(rng, size, center):
         if abs(pos.x - center.x) < view_half_w and abs(pos.y - center.y) < view_half_h:
             continue
         asteroid = spawn_asteroid(rng, size, avoid_center=False)
-        asteroid["pos"] = pos
+        asteroid.pos = pos
         return asteroid
     asteroid = spawn_asteroid(rng, size, avoid_center=False)
-    asteroid["pos"] = center + pygame.Vector2(ASTEROID_SPAWN_RADIUS, 0)
+    asteroid.pos = center + pygame.Vector2(ASTEROID_SPAWN_RADIUS, 0)
     return asteroid
 
 
@@ -213,21 +253,41 @@ def spawn_pickup(rng):
     kind = rng.choice(["shield", "rapid", "boost_canister"])
     pos = pygame.Vector2(rng.uniform(0, WORLD_WIDTH), rng.uniform(0, WORLD_HEIGHT))
     shell_hp = CANISTER_HITS if kind == "boost_canister" else 0
-    return {"kind": kind, "pos": pos, "ttl": PICKUP_TTL, "shell_hp": shell_hp}
+    return Pickup(kind=kind, pos=pos, ttl=PICKUP_TTL, shell_hp=shell_hp)
 
 
 def spawn_enemy(rng):
     pos = pygame.Vector2(rng.uniform(0, WORLD_WIDTH), rng.uniform(0, WORLD_HEIGHT))
     angle = rng.uniform(0, 360)
-    return {
-        "pos": pos,
-        "vel": pygame.Vector2(0, 0),
-        "angle": angle,
-        "shield": ENEMY_SHIELD_HITS,
-        "fire_timer": rng.uniform(0, ENEMY_FIRE_COOLDOWN),
-        "wander_timer": rng.uniform(0.5, 1.5),
-        "wander_angle": angle,
-    }
+    return Enemy(
+        pos=pos,
+        vel=pygame.Vector2(0, 0),
+        angle=angle,
+        shield=ENEMY_SHIELD_HITS,
+        fire_timer=rng.uniform(0, ENEMY_FIRE_COOLDOWN),
+        wander_timer=rng.uniform(0.5, 1.5),
+        wander_angle=angle,
+    )
+
+
+def spawn_enemy_near(rng, center):
+    view_half_w = WIDTH / (2 * CAMERA_ZOOM) + ENEMY_OFFSCREEN_MARGIN
+    view_half_h = HEIGHT / (2 * CAMERA_ZOOM) + ENEMY_OFFSCREEN_MARGIN
+    for _ in range(60):
+        offset = pygame.Vector2(rng.uniform(ENEMY_SPAWN_BUFFER, ENEMY_SPAWN_RADIUS), 0).rotate(
+            rng.uniform(0, 360)
+        )
+        pos = center + offset
+        if not (0 <= pos.x <= WORLD_WIDTH and 0 <= pos.y <= WORLD_HEIGHT):
+            continue
+        if abs(pos.x - center.x) < view_half_w and abs(pos.y - center.y) < view_half_h:
+            continue
+        enemy = spawn_enemy(rng)
+        enemy.pos = pos
+        return enemy
+    enemy = spawn_enemy(rng)
+    enemy.pos = clamp_position(center + pygame.Vector2(ENEMY_SPAWN_RADIUS, 0), radius=ENEMY_RADIUS)
+    return enemy
 
 
 def segment_hits_circle(rel_prev, rel_curr, radius):
@@ -320,17 +380,17 @@ def generate_pickups(seed):
                 min(WORLD_HEIGHT - 1, y + rng.uniform(0, cell_h)),
             )
             pickups.append(spawn_pickup(rng))
-            pickups[-1]["pos"] = pos
+            pickups[-1].pos = pos
             y += cell_h
         x += cell_w
     return pickups
 
 
-def generate_enemies(seed):
+def generate_enemies(seed, center):
     rng = random.Random(seed ^ 0x1EADBEEF)
     enemies = []
-    for _ in range(ENEMY_COUNT):
-        enemies.append(spawn_enemy(rng))
+    for _ in range(ENEMY_NEARBY_TARGET):
+        enemies.append(spawn_enemy_near(rng, center))
     return enemies
 
 
@@ -392,7 +452,8 @@ def new_world(seed):
         size = 4 if rng.random() < 0.12 else 3
         asteroids.append(spawn_asteroid(rng, size))
     pickups = generate_pickups(seed)
-    enemies = generate_enemies(seed)
+    center = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
+    enemies = generate_enemies(seed, center)
     landmarks = generate_landmarks(seed)
     stars = generate_starfield(seed)
     freighters = generate_freighters(seed, landmarks)
@@ -421,65 +482,65 @@ def deserialize_vec(value):
 
 def serialize_asteroid(asteroid):
     return {
-        "pos": serialize_vec(asteroid["pos"]),
-        "vel": serialize_vec(asteroid["vel"]),
-        "size": asteroid["size"],
-        "radius": asteroid["radius"],
-        "spin": asteroid["spin"],
-        "angle": asteroid["angle"],
-        "shape": asteroid["shape"],
+        "pos": serialize_vec(asteroid.pos),
+        "vel": serialize_vec(asteroid.vel),
+        "size": asteroid.size,
+        "radius": asteroid.radius,
+        "spin": asteroid.spin,
+        "angle": asteroid.angle,
+        "shape": asteroid.shape,
     }
 
 
 def deserialize_asteroid(data):
-    return {
-        "pos": deserialize_vec(data["pos"]),
-        "vel": deserialize_vec(data["vel"]),
-        "size": data["size"],
-        "radius": data["radius"],
-        "spin": data["spin"],
-        "angle": data["angle"],
-        "shape": [tuple(p) for p in data["shape"]],
-    }
+    return Asteroid(
+        pos=deserialize_vec(data["pos"]),
+        vel=deserialize_vec(data["vel"]),
+        size=data["size"],
+        radius=data["radius"],
+        spin=data["spin"],
+        angle=data["angle"],
+        shape=[tuple(p) for p in data["shape"]],
+    )
 
 
 def serialize_pickup(pickup):
     return {
-        "kind": pickup["kind"],
-        "pos": serialize_vec(pickup["pos"]),
-        "ttl": pickup["ttl"],
-        "shell_hp": pickup.get("shell_hp", 0),
+        "kind": pickup.kind,
+        "pos": serialize_vec(pickup.pos),
+        "ttl": pickup.ttl,
+        "shell_hp": pickup.shell_hp,
     }
 
 
 def deserialize_pickup(data):
     kind = data["kind"]
     shell_hp = data.get("shell_hp", CANISTER_HITS if kind == "boost_canister" else 0)
-    return {"kind": kind, "pos": deserialize_vec(data["pos"]), "ttl": data["ttl"], "shell_hp": shell_hp}
+    return Pickup(kind=kind, pos=deserialize_vec(data["pos"]), ttl=data["ttl"], shell_hp=shell_hp)
 
 
 def serialize_enemy(enemy):
     return {
-        "pos": serialize_vec(enemy["pos"]),
-        "angle": enemy["angle"],
-        "shield": enemy["shield"],
-        "fire_timer": enemy["fire_timer"],
-        "wander_timer": enemy["wander_timer"],
-        "wander_angle": enemy["wander_angle"],
+        "pos": serialize_vec(enemy.pos),
+        "angle": enemy.angle,
+        "shield": enemy.shield,
+        "fire_timer": enemy.fire_timer,
+        "wander_timer": enemy.wander_timer,
+        "wander_angle": enemy.wander_angle,
     }
 
 
 def deserialize_enemy(data):
     angle = data.get("angle", 0.0)
-    return {
-        "pos": deserialize_vec(data["pos"]),
-        "vel": pygame.Vector2(0, 0),
-        "angle": angle,
-        "shield": data.get("shield", ENEMY_SHIELD_HITS),
-        "fire_timer": data.get("fire_timer", 0.0),
-        "wander_timer": data.get("wander_timer", 0.0),
-        "wander_angle": data.get("wander_angle", angle),
-    }
+    return Enemy(
+        pos=deserialize_vec(data["pos"]),
+        vel=pygame.Vector2(0, 0),
+        angle=angle,
+        shield=data.get("shield", ENEMY_SHIELD_HITS),
+        fire_timer=data.get("fire_timer", 0.0),
+        wander_timer=data.get("wander_timer", 0.0),
+        wander_angle=data.get("wander_angle", angle),
+    )
 
 
 def draw_vector_shape(surface, pos, angle, points, color, width=2):
@@ -592,6 +653,7 @@ def main():
     boost_time = 0.0
     boost_stock = 0
     asteroid_spawn_timer = 0.0
+    enemy_spawn_timer = 0.0
     thrusting_render = False
     show_map = False
     discovered_planets = set()
@@ -713,11 +775,7 @@ def main():
                 if "enemies" in data:
                     enemies = [deserialize_enemy(e) for e in data["enemies"]]
                 else:
-                    enemies = generate_enemies(seed)
-                if len(enemies) < ENEMY_COUNT:
-                    rng = random.Random(seed ^ int(time.time()))
-                    for _ in range(ENEMY_COUNT - len(enemies)):
-                        enemies.append(spawn_enemy(rng))
+                    enemies = generate_enemies(seed, pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2))
                 landmarks = generate_landmarks(seed)
                 stars = generate_starfield(seed)
                 freighters = generate_freighters(seed, landmarks)
@@ -735,6 +793,10 @@ def main():
                 game_over = False
                 last_death_cause = None
                 discovered_planets = set(data.get("discovered_planets", []))
+                if len(enemies) < ENEMY_NEARBY_TARGET:
+                    rng = random.Random(seed ^ int(time.time()))
+                    for _ in range(ENEMY_NEARBY_TARGET - len(enemies)):
+                        enemies.append(spawn_enemy_near(rng, ship_pos))
 
         if not game_over:
             turn = 0
@@ -857,21 +919,39 @@ def main():
                 enemy_bullets.pop(i)
 
         for asteroid in asteroids:
-            asteroid["prev"] = pygame.Vector2(asteroid["pos"])
-            asteroid["pos"] += asteroid["vel"] * dt
-            asteroid["angle"] += asteroid["spin"] * dt
-            if asteroid["pos"].x < asteroid["radius"]:
-                asteroid["pos"].x = asteroid["radius"]
-                asteroid["vel"].x = abs(asteroid["vel"].x)
-            elif asteroid["pos"].x > WORLD_WIDTH - asteroid["radius"]:
-                asteroid["pos"].x = WORLD_WIDTH - asteroid["radius"]
-                asteroid["vel"].x = -abs(asteroid["vel"].x)
-            if asteroid["pos"].y < asteroid["radius"]:
-                asteroid["pos"].y = asteroid["radius"]
-                asteroid["vel"].y = abs(asteroid["vel"].y)
-            elif asteroid["pos"].y > WORLD_HEIGHT - asteroid["radius"]:
-                asteroid["pos"].y = WORLD_HEIGHT - asteroid["radius"]
-                asteroid["vel"].y = -abs(asteroid["vel"].y)
+            asteroid.prev = pygame.Vector2(asteroid.pos)
+            asteroid.pos += asteroid.vel * dt
+            asteroid.angle += asteroid.spin * dt
+            if asteroid.pos.x < asteroid.radius:
+                asteroid.pos.x = asteroid.radius
+                asteroid.vel.x = abs(asteroid.vel.x)
+            elif asteroid.pos.x > WORLD_WIDTH - asteroid.radius:
+                asteroid.pos.x = WORLD_WIDTH - asteroid.radius
+                asteroid.vel.x = -abs(asteroid.vel.x)
+            if asteroid.pos.y < asteroid.radius:
+                asteroid.pos.y = asteroid.radius
+                asteroid.vel.y = abs(asteroid.vel.y)
+            elif asteroid.pos.y > WORLD_HEIGHT - asteroid.radius:
+                asteroid.pos.y = WORLD_HEIGHT - asteroid.radius
+                asteroid.vel.y = -abs(asteroid.vel.y)
+
+        enemy_spawn_timer -= dt
+        if enemy_spawn_timer <= 0:
+            enemy_spawn_timer = ENEMY_SPAWN_INTERVAL
+            radius_sq = ENEMY_NEARBY_RADIUS * ENEMY_NEARBY_RADIUS
+            nearby = 0
+            for enemy in enemies:
+                if (enemy.pos - ship_pos).length_squared() <= radius_sq:
+                    nearby += 1
+            if nearby < ENEMY_NEARBY_TARGET:
+                rng = random.Random(seed + score + int(time.time()))
+                to_spawn = min(6, ENEMY_NEARBY_TARGET - nearby)
+                for _ in range(to_spawn):
+                    enemies.append(spawn_enemy_near(rng, ship_pos))
+        despawn_sq = ENEMY_DESPAWN_RADIUS * ENEMY_DESPAWN_RADIUS
+        for enemy in enemies[:]:
+            if (enemy.pos - ship_pos).length_squared() > despawn_sq:
+                enemies.remove(enemy)
 
         asteroid_spawn_timer -= dt
         if asteroid_spawn_timer <= 0:
@@ -879,7 +959,7 @@ def main():
             nearby = 0
             radius_sq = ASTEROID_NEARBY_RADIUS * ASTEROID_NEARBY_RADIUS
             for asteroid in asteroids:
-                if (asteroid["pos"] - ship_pos).length_squared() <= radius_sq:
+                if (asteroid.pos - ship_pos).length_squared() <= radius_sq:
                     nearby += 1
             if nearby < ASTEROID_NEARBY_TARGET:
                 rng = random.Random(seed + score + int(time.time()))
@@ -889,56 +969,56 @@ def main():
                     asteroids.append(spawn_asteroid_near(rng, size, ship_pos))
 
         for enemy in enemies:
-            enemy["prev"] = pygame.Vector2(enemy["pos"])
-            to_player = ship_pos - enemy["pos"]
+            enemy.prev = pygame.Vector2(enemy.pos)
+            to_player = ship_pos - enemy.pos
             dist_sq = to_player.length_squared()
             pursuing = dist_sq <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS
             if pursuing and dist_sq > 0:
                 target_angle = vector_to_angle(to_player)
-                enemy["angle"] = turn_towards(enemy["angle"], target_angle, ENEMY_TURN_SPEED * dt)
+                enemy.angle = turn_towards(enemy.angle, target_angle, ENEMY_TURN_SPEED * dt)
                 speed = ENEMY_PURSUE_SPEED
             else:
-                enemy["wander_timer"] -= dt
-                if enemy["wander_timer"] <= 0:
-                    enemy["wander_timer"] = random.uniform(0.8, 2.2)
-                    enemy["wander_angle"] = (enemy["angle"] + random.uniform(-120, 120)) % 360
-                enemy["angle"] = turn_towards(enemy["angle"], enemy["wander_angle"], ENEMY_TURN_SPEED * dt * 0.6)
+                enemy.wander_timer -= dt
+                if enemy.wander_timer <= 0:
+                    enemy.wander_timer = random.uniform(0.8, 2.2)
+                    enemy.wander_angle = (enemy.angle + random.uniform(-120, 120)) % 360
+                enemy.angle = turn_towards(enemy.angle, enemy.wander_angle, ENEMY_TURN_SPEED * dt * 0.6)
                 speed = ENEMY_SCOUT_SPEED
 
-            enemy["vel"] = angle_to_vector(enemy["angle"]) * speed
-            enemy["pos"] = enemy["pos"] + enemy["vel"] * dt
-            if enemy["pos"].x < ENEMY_RADIUS:
-                enemy["pos"].x = ENEMY_RADIUS
-                enemy["vel"].x = abs(enemy["vel"].x)
-                enemy["angle"] = vector_to_angle(enemy["vel"])
-            elif enemy["pos"].x > WORLD_WIDTH - ENEMY_RADIUS:
-                enemy["pos"].x = WORLD_WIDTH - ENEMY_RADIUS
-                enemy["vel"].x = -abs(enemy["vel"].x)
-                enemy["angle"] = vector_to_angle(enemy["vel"])
-            if enemy["pos"].y < ENEMY_RADIUS:
-                enemy["pos"].y = ENEMY_RADIUS
-                enemy["vel"].y = abs(enemy["vel"].y)
-                enemy["angle"] = vector_to_angle(enemy["vel"])
-            elif enemy["pos"].y > WORLD_HEIGHT - ENEMY_RADIUS:
-                enemy["pos"].y = WORLD_HEIGHT - ENEMY_RADIUS
-                enemy["vel"].y = -abs(enemy["vel"].y)
-                enemy["angle"] = vector_to_angle(enemy["vel"])
-            enemy["fire_timer"] = max(0.0, enemy["fire_timer"] - dt)
+            enemy.vel = angle_to_vector(enemy.angle) * speed
+            enemy.pos = enemy.pos + enemy.vel * dt
+            if enemy.pos.x < ENEMY_RADIUS:
+                enemy.pos.x = ENEMY_RADIUS
+                enemy.vel.x = abs(enemy.vel.x)
+                enemy.angle = vector_to_angle(enemy.vel)
+            elif enemy.pos.x > WORLD_WIDTH - ENEMY_RADIUS:
+                enemy.pos.x = WORLD_WIDTH - ENEMY_RADIUS
+                enemy.vel.x = -abs(enemy.vel.x)
+                enemy.angle = vector_to_angle(enemy.vel)
+            if enemy.pos.y < ENEMY_RADIUS:
+                enemy.pos.y = ENEMY_RADIUS
+                enemy.vel.y = abs(enemy.vel.y)
+                enemy.angle = vector_to_angle(enemy.vel)
+            elif enemy.pos.y > WORLD_HEIGHT - ENEMY_RADIUS:
+                enemy.pos.y = WORLD_HEIGHT - ENEMY_RADIUS
+                enemy.vel.y = -abs(enemy.vel.y)
+                enemy.angle = vector_to_angle(enemy.vel)
+            enemy.fire_timer = max(0.0, enemy.fire_timer - dt)
             if (
                 pursuing
                 and dist_sq <= ENEMY_FIRE_RANGE * ENEMY_FIRE_RANGE
-                and enemy["fire_timer"] <= 0.0
+                and enemy.fire_timer <= 0.0
             ):
-                bullet_vel = angle_to_vector(enemy["angle"]) * ENEMY_BULLET_SPEED + enemy["vel"] * 0.2
+                bullet_vel = angle_to_vector(enemy.angle) * ENEMY_BULLET_SPEED + enemy.vel * 0.2
                 enemy_bullets.append(
                     {
-                        "pos": pygame.Vector2(enemy["pos"]),
-                        "prev": pygame.Vector2(enemy["pos"]),
+                        "pos": pygame.Vector2(enemy.pos),
+                        "prev": pygame.Vector2(enemy.pos),
                         "vel": bullet_vel,
                         "ttl": ENEMY_BULLET_TTL,
                     }
                 )
-                enemy["fire_timer"] = ENEMY_FIRE_COOLDOWN
+                enemy.fire_timer = ENEMY_FIRE_COOLDOWN
 
         for freighter in freighters:
             to_target = freighter["target"] - freighter["pos"]
@@ -961,8 +1041,8 @@ def main():
         if not game_over:
             if shield_prev > 0 and shield_time <= 0:
                 for asteroid in asteroids:
-                    hit_radius = asteroid["radius"] + SHIP_RADIUS
-                    if moving_circle_hit(ship_pos, ship_pos, asteroid["pos"], asteroid["pos"], hit_radius):
+                    hit_radius = asteroid.radius + SHIP_RADIUS
+                    if moving_circle_hit(ship_pos, ship_pos, asteroid.pos, asteroid.pos, hit_radius):
                         lives -= 1
                         last_death_cause = "asteroid"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
@@ -986,12 +1066,12 @@ def main():
                             break
 
             for pickup in pickups:
-                if moving_circle_hit(ship_prev, ship_pos, pickup["pos"], pickup["pos"], SHIP_RADIUS + 10):
-                    if pickup["kind"] == "boost_canister":
+                if moving_circle_hit(ship_prev, ship_pos, pickup.pos, pickup.pos, SHIP_RADIUS + 10):
+                    if pickup.kind == "boost_canister":
                         continue
-                    if pickup["kind"] == "shield":
+                    if pickup.kind == "shield":
                         shield_stock += 1
-                    elif pickup["kind"] == "boost":
+                    elif pickup.kind == "boost":
                         boost_stock += 1
                     else:
                         rapid_time = 7.0
@@ -1011,9 +1091,9 @@ def main():
                     break
 
             for enemy in enemies:
-                enemy_prev = enemy.get("prev", enemy["pos"])
+                enemy_prev = enemy.prev or enemy.pos
                 hit_radius = ENEMY_RADIUS + SHIP_RADIUS
-                if moving_circle_hit(enemy_prev, enemy["pos"], ship_prev, ship_pos, hit_radius):
+                if moving_circle_hit(enemy_prev, enemy.pos, ship_prev, ship_pos, hit_radius):
                     if shield_time <= 0:
                         lives -= 1
                         last_death_cause = "enemy ship"
@@ -1024,9 +1104,9 @@ def main():
                     break
 
             for asteroid in asteroids[:]:
-                asteroid_prev = asteroid.get("prev", asteroid["pos"])
-                hit_radius = asteroid["radius"] + SHIP_RADIUS
-                if moving_circle_hit(ship_prev, ship_pos, asteroid_prev, asteroid["pos"], hit_radius):
+                asteroid_prev = asteroid.prev or asteroid.pos
+                hit_radius = asteroid.radius + SHIP_RADIUS
+                if moving_circle_hit(ship_prev, ship_pos, asteroid_prev, asteroid.pos, hit_radius):
                     if shield_time <= 0:
                         lives -= 1
                         last_death_cause = "asteroid"
@@ -1039,16 +1119,16 @@ def main():
             for bullet in bullets[:]:
                 hit_enemy = None
                 for enemy in enemies:
-                    enemy_prev = enemy.get("prev", enemy["pos"])
+                    enemy_prev = enemy.prev or enemy.pos
                     bullet_prev = bullet.get("prev", bullet["pos"])
                     radius = ENEMY_RADIUS + BULLET_HIT_SLOP
-                    if moving_circle_hit(bullet_prev, bullet["pos"], enemy_prev, enemy["pos"], radius):
+                    if moving_circle_hit(bullet_prev, bullet["pos"], enemy_prev, enemy.pos, radius):
                         hit_enemy = enemy
                         break
                 if hit_enemy:
                     bullets.remove(bullet)
-                    if hit_enemy["shield"] > 0:
-                        hit_enemy["shield"] -= 1
+                    if hit_enemy.shield > 0:
+                        hit_enemy.shield -= 1
                     else:
                         enemies.remove(hit_enemy)
                         score += 100
@@ -1056,50 +1136,50 @@ def main():
 
                 hit_canister = None
                 for pickup in pickups:
-                    if pickup["kind"] != "boost_canister":
+                    if pickup.kind != "boost_canister":
                         continue
                     bullet_prev = bullet.get("prev", bullet["pos"])
                     radius = CANISTER_RADIUS + BULLET_HIT_SLOP
-                    if moving_circle_hit(bullet_prev, bullet["pos"], pickup["pos"], pickup["pos"], radius):
+                    if moving_circle_hit(bullet_prev, bullet["pos"], pickup.pos, pickup.pos, radius):
                         hit_canister = pickup
                         break
                 if hit_canister:
                     bullets.remove(bullet)
-                    hit_canister["shell_hp"] = max(0, hit_canister.get("shell_hp", CANISTER_HITS) - 1)
-                    if hit_canister["shell_hp"] <= 0:
-                        hit_canister["kind"] = "boost"
-                        hit_canister["shell_hp"] = 0
+                    hit_canister.shell_hp = max(0, hit_canister.shell_hp - 1)
+                    if hit_canister.shell_hp <= 0:
+                        hit_canister.kind = "boost"
+                        hit_canister.shell_hp = 0
                     continue
 
                 hit = None
                 for asteroid in asteroids:
-                    asteroid_prev = asteroid.get("prev", asteroid["pos"])
+                    asteroid_prev = asteroid.prev or asteroid.pos
                     bullet_prev = bullet.get("prev", bullet["pos"])
-                    radius = asteroid["radius"] + BULLET_HIT_SLOP
-                    if moving_circle_hit(bullet_prev, bullet["pos"], asteroid_prev, asteroid["pos"], radius):
+                    radius = asteroid.radius + BULLET_HIT_SLOP
+                    if moving_circle_hit(bullet_prev, bullet["pos"], asteroid_prev, asteroid.pos, radius):
                         hit = asteroid
                         break
                 if hit:
                     bullets.remove(bullet)
                     asteroids.remove(hit)
-                    score += 10 * hit["size"]
-                    if hit["size"] > 1:
-                        rng = random.Random(seed + score + int(hit["pos"].x))
+                    score += 10 * hit.size
+                    if hit.size > 1:
+                        rng = random.Random(seed + score + int(hit.pos.x))
                         for _ in range(2):
-                            child = spawn_asteroid(rng, hit["size"] - 1, avoid_center=False)
-                            child["pos"] = pygame.Vector2(hit["pos"])
-                            child["vel"] = hit["vel"].rotate(rng.uniform(-50, 50)) * 1.2
+                            child = spawn_asteroid(rng, hit.size - 1, avoid_center=False)
+                            child.pos = pygame.Vector2(hit.pos)
+                            child.vel = hit.vel.rotate(rng.uniform(-50, 50)) * 1.2
                             asteroids.append(child)
                     break
 
             for enemy in enemies[:]:
-                if enemy["shield"] > 0:
+                if enemy.shield > 0:
                     continue
-                enemy_prev = enemy.get("prev", enemy["pos"])
+                enemy_prev = enemy.prev or enemy.pos
                 for asteroid in asteroids:
-                    asteroid_prev = asteroid.get("prev", asteroid["pos"])
-                    hit_radius = asteroid["radius"] + ENEMY_RADIUS
-                    if moving_circle_hit(enemy_prev, enemy["pos"], asteroid_prev, asteroid["pos"], hit_radius):
+                    asteroid_prev = asteroid.prev or asteroid.pos
+                    hit_radius = asteroid.radius + ENEMY_RADIUS
+                    if moving_circle_hit(enemy_prev, enemy.pos, asteroid_prev, asteroid.pos, hit_radius):
                         enemies.remove(enemy)
                         score += 100
                         break
@@ -1127,16 +1207,16 @@ def main():
 
         for asteroid in asteroids[:]:
             for landmark in landmarks:
-                asteroid_prev = asteroid.get("prev", asteroid["pos"])
-                hit_radius = asteroid["radius"] + landmark["radius"]
-                if moving_circle_hit(asteroid_prev, asteroid["pos"], landmark["pos"], landmark["pos"], hit_radius):
+                asteroid_prev = asteroid.prev or asteroid.pos
+                hit_radius = asteroid.radius + landmark["radius"]
+                if moving_circle_hit(asteroid_prev, asteroid.pos, landmark["pos"], landmark["pos"], hit_radius):
                     asteroids.remove(asteroid)
-                    if asteroid["size"] > 1:
-                        rng = random.Random(seed + int(asteroid["pos"].x) + int(asteroid["pos"].y))
+                    if asteroid.size > 1:
+                        rng = random.Random(seed + int(asteroid.pos.x) + int(asteroid.pos.y))
                         for _ in range(2):
-                            child = spawn_asteroid(rng, asteroid["size"] - 1, avoid_center=False)
-                            child["pos"] = pygame.Vector2(asteroid["pos"])
-                            child["vel"] = asteroid["vel"].rotate(rng.uniform(-60, 60)) * 1.2
+                            child = spawn_asteroid(rng, asteroid.size - 1, avoid_center=False)
+                            child.pos = pygame.Vector2(asteroid.pos)
+                            child.vel = asteroid.vel.rotate(rng.uniform(-60, 60)) * 1.2
                             asteroids.append(child)
                     break
 
@@ -1188,9 +1268,9 @@ def main():
                     discovered_planets.add(landmark.get("id"))
 
         for asteroid in asteroids:
-            screen_pos = world_to_screen(asteroid["pos"], ship_pos)
-            draw_radius = asteroid["radius"] * CAMERA_ZOOM
-            draw_vector_shape(screen, screen_pos, asteroid["angle"], asteroid["shape"], COLORS["asteroid"], 2)
+            screen_pos = world_to_screen(asteroid.pos, ship_pos)
+            draw_radius = asteroid.radius * CAMERA_ZOOM
+            draw_vector_shape(screen, screen_pos, asteroid.angle, asteroid.shape, COLORS["asteroid"], 2)
 
         for bullet in bullets:
             screen_pos = world_to_screen(bullet["pos"], ship_pos)
@@ -1215,8 +1295,8 @@ def main():
             )
 
         for enemy in enemies:
-            screen_pos = world_to_screen(enemy["pos"], ship_pos)
-            if enemy["shield"] > 0:
+            screen_pos = world_to_screen(enemy.pos, ship_pos)
+            if enemy.shield > 0:
                 shield_radius = (ENEMY_RADIUS + 8) * CAMERA_ZOOM
                 pygame.draw.circle(
                     screen,
@@ -1225,7 +1305,7 @@ def main():
                     max(1, int(shield_radius)),
                     1,
                 )
-            draw_ship(screen, screen_pos, enemy["angle"], COLORS["enemy"])
+            draw_ship(screen, screen_pos, enemy.angle, COLORS["enemy"])
 
         for freighter in freighters:
             screen_pos = world_to_screen(freighter["pos"], ship_pos)
@@ -1240,8 +1320,8 @@ def main():
             draw_freighter(screen, screen_pos, freighter["angle"], COLORS["freighter"])
 
         for pickup in pickups:
-            screen_pos = world_to_screen(pickup["pos"], ship_pos)
-            if pickup["kind"] == "boost_canister":
+            screen_pos = world_to_screen(pickup.pos, ship_pos)
+            if pickup.kind == "boost_canister":
                 shell_radius = max(2, int(CANISTER_RADIUS * CAMERA_ZOOM))
                 core_radius = max(1, int((PICKUP_RADIUS * 0.45) * CAMERA_ZOOM))
                 shell_rect = pygame.Rect(0, 0, shell_radius * 2, shell_radius * 2)
@@ -1252,9 +1332,9 @@ def main():
                 pygame.draw.rect(screen, COLORS["pickup_canister"], core_rect, 1)
                 continue
 
-            if pickup["kind"] == "shield":
+            if pickup.kind == "shield":
                 color = COLORS["pickup_shield"]
-            elif pickup["kind"] == "boost":
+            elif pickup.kind == "boost":
                 color = COLORS["pickup_boost"]
             else:
                 color = COLORS["pickup_rapid"]
@@ -1326,7 +1406,6 @@ def main():
             f"Rapid: {rapid_time:.1f}s" if rapid_time > 0 else "Rapid: -",
             f"Boost: {boost_time:.1f}s" if boost_time > 0 else "Boost: -",
             f"Boost Stock: {boost_stock}",
-            f"Enemies: {len(enemies)}",
         ]
         if show_gamepad_debug:
             hud.append(f"Last Death: {last_death_cause}" if last_death_cause else "Last Death: -")

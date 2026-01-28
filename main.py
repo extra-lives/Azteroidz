@@ -44,6 +44,7 @@ ASTEROID_SPEED = {
     2: (50, 110),
     1: (80, 150),
 }
+ASTEROID_SHAPE_CACHE = {}
 
 ASTEROID_NEARBY_TARGET = 28
 ASTEROID_NEARBY_RADIUS = 1800
@@ -62,13 +63,13 @@ ENEMY_FIRE_COOLDOWN = 1.4
 ENEMY_BULLET_SPEED = 400
 ENEMY_BULLET_TTL = 4.0
 ENEMY_SHIELD_HITS = 1
-ENEMY_NEARBY_TARGET = 25
-ENEMY_NEARBY_RADIUS = 3000
-ENEMY_SPAWN_RADIUS = 3200
-ENEMY_SPAWN_BUFFER = 1400
+ENEMY_NEARBY_TARGET = 12
+ENEMY_NEARBY_RADIUS = 3600
+ENEMY_SPAWN_RADIUS = 4000
+ENEMY_SPAWN_BUFFER = 1800
 ENEMY_OFFSCREEN_MARGIN = 240
 ENEMY_DESPAWN_RADIUS = 5200
-ENEMY_SPAWN_INTERVAL = 2.4
+ENEMY_SPAWN_INTERVAL = 3.2
 
 PICKUP_TTL = 15.0
 PICKUP_GRID_SPACING = 1.25
@@ -203,6 +204,14 @@ def make_asteroid_shape(rng, radius):
     return points
 
 
+def get_asteroid_shape(rng, radius):
+    cached = ASTEROID_SHAPE_CACHE.get(radius)
+    if cached is None:
+        cached = make_asteroid_shape(rng, radius)
+        ASTEROID_SHAPE_CACHE[radius] = cached
+    return cached
+
+
 def spawn_asteroid(rng, size, avoid_center=True):
     radius = int(ASTEROID_SIZES[size] * rng.uniform(0.75, 1.35))
     if avoid_center:
@@ -216,7 +225,7 @@ def spawn_asteroid(rng, size, avoid_center=True):
     speed_min, speed_max = ASTEROID_SPEED[size]
     velocity = angle_to_vector(rng.uniform(0, 360)) * rng.uniform(speed_min, speed_max)
     spin = rng.uniform(-40, 40)
-    shape = make_asteroid_shape(rng, radius)
+    shape = get_asteroid_shape(rng, radius)
     return Asteroid(
         pos=pos,
         vel=velocity,
@@ -493,14 +502,20 @@ def serialize_asteroid(asteroid):
 
 
 def deserialize_asteroid(data):
+    radius = data["radius"]
+    cached = ASTEROID_SHAPE_CACHE.get(radius)
+    if cached is None:
+        rng = random.Random(radius * 9176)
+        cached = make_asteroid_shape(rng, radius)
+        ASTEROID_SHAPE_CACHE[radius] = cached
     return Asteroid(
         pos=deserialize_vec(data["pos"]),
         vel=deserialize_vec(data["vel"]),
         size=data["size"],
-        radius=data["radius"],
+        radius=radius,
         spin=data["spin"],
         angle=data["angle"],
-        shape=[tuple(p) for p in data["shape"]],
+        shape=cached,
     )
 
 
@@ -1066,7 +1081,8 @@ def main():
                             break
 
             for pickup in pickups:
-                if moving_circle_hit(ship_prev, ship_pos, pickup.pos, pickup.pos, SHIP_RADIUS + 10):
+                pickup_hit_radius = SHIP_RADIUS + PICKUP_RADIUS * 0.8
+                if moving_circle_hit(ship_prev, ship_pos, pickup.pos, pickup.pos, pickup_hit_radius):
                     if pickup.kind == "boost_canister":
                         continue
                     if pickup.kind == "shield":

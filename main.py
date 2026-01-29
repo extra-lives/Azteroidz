@@ -420,14 +420,18 @@ def moving_circle_hit(prev_a, curr_a, prev_b, curr_b, radius):
 def generate_landmarks(seed):
     rng = random.Random(seed)
     landmarks = []
-    planet_count = 20
+    planet_count = 12
     planets = []
     planet_id = 0
     for _ in range(planet_count):
         radius = rng.randint(1760, 2880)
-        for _ in range(40):
-            pos = pygame.Vector2(rng.uniform(0, WORLD_WIDTH), rng.uniform(0, WORLD_HEIGHT))
-            if all((pos - p.pos).length() >= p.radius + radius + 220 for p in planets):
+        placed = False
+        for _ in range(60):
+            pos = pygame.Vector2(
+                rng.uniform(radius, WORLD_WIDTH - radius),
+                rng.uniform(radius, WORLD_HEIGHT - radius),
+            )
+            if all((pos - p.pos).length() >= p.radius + radius + 1000 for p in planets):
                 planets.append(
                     Landmark(
                         id=planet_id,
@@ -438,28 +442,28 @@ def generate_landmarks(seed):
                     )
                 )
                 planet_id += 1
+                placed = True
                 break
-        else:
-            planets.append(
-                Landmark(
-                    id=planet_id,
-                    kind="planet",
-                    pos=pos,
-                    radius=radius,
-                    color=COLORS["planet"],
-                )
-            )
-            planet_id += 1
+        if not placed:
+            continue
     landmarks.extend(planets)
     moon_id = 0
+    moons = []
     for parent in planets:
         size = rng.randint(int(parent.radius * 0.16), int(parent.radius * 0.4))
         min_orbit = parent.radius + size + 120
         max_orbit = parent.radius + size + 520
-        offset = pygame.Vector2(rng.uniform(min_orbit, max_orbit), 0).rotate(rng.uniform(0, 360))
-        moon_pos = clamp_position(parent.pos + offset, radius=size)
-        landmarks.append(
-            Landmark(
+        placed = False
+        for _ in range(50):
+            offset = pygame.Vector2(rng.uniform(min_orbit, max_orbit), 0).rotate(rng.uniform(0, 360))
+            moon_pos = parent.pos + offset
+            if not (size <= moon_pos.x <= WORLD_WIDTH - size and size <= moon_pos.y <= WORLD_HEIGHT - size):
+                continue
+            if any((moon_pos - p.pos).length() < p.radius + size + 140 for p in planets):
+                continue
+            if any((moon_pos - m.pos).length() < m.radius + size + 80 for m in moons):
+                continue
+            landmark = Landmark(
                 id=moon_id,
                 kind="moon",
                 pos=moon_pos,
@@ -467,8 +471,13 @@ def generate_landmarks(seed):
                 color=COLORS["moon"],
                 parent_id=parent.id,
             )
-        )
-        moon_id += 1
+            moons.append(landmark)
+            landmarks.append(landmark)
+            moon_id += 1
+            placed = True
+            break
+        if not placed:
+            continue
     return landmarks
 
 
@@ -704,10 +713,11 @@ def draw_freighter(surface, pos, angle, color):
     cargo_radius = max(2, int(FREIGHTER_RADIUS * CAMERA_ZOOM * 0.18))
     cargo_x = [-tail * 0.3, 0.0]
     cargo_y = [-half_w * 0.25, half_w * 0.25]
+    cargo_color = (190, 150, 100)
     for x in cargo_x:
         for y in cargo_y:
             cargo_pos = pos + pygame.Vector2(x, y).rotate(angle)
-            pygame.draw.circle(surface, color, (int(cargo_pos.x), int(cargo_pos.y)), cargo_radius, 1)
+            pygame.draw.circle(surface, cargo_color, (int(cargo_pos.x), int(cargo_pos.y)), cargo_radius, 1)
 
 
 def draw_edge_arrow(surface, direction, color):
@@ -727,9 +737,9 @@ def draw_edge_arrow(surface, direction, color):
     pygame.draw.polygon(surface, color, [(tip.x, tip.y), (left.x, left.y), (right.x, right.y)], 2)
 
 
-def draw_thruster(surface, pos, angle, color, scale=1.0):
+def draw_thruster(surface, pos, angle, color, scale=1.0, back_mult=1.7):
     render_radius = SHIP_RADIUS * CAMERA_ZOOM
-    back = pygame.Vector2(-render_radius * 1.7, 0).rotate(angle)
+    back = pygame.Vector2(-render_radius * back_mult, 0).rotate(angle)
     perp = pygame.Vector2(0, render_radius * 0.35).rotate(angle)
     base = pos + back
     lengths = [render_radius * 1.8 * scale, render_radius * 1.3 * scale, render_radius * 0.9 * scale]
@@ -860,8 +870,6 @@ def main():
             for landmark in landmarks:
                 kind = landmark.kind
                 if kind == "planet":
-                    if landmark.id not in discovered_planets:
-                        continue
                     color = COLORS["planet"]
                 elif kind == "moon":
                     if landmark.parent_id not in discovered_planets:
@@ -1632,6 +1640,7 @@ def main():
                 max(1, int(shield_radius)),
                 1,
             )
+            draw_thruster(screen, screen_pos, freighter["angle"], COLORS["pickup_rapid"], 0.9, 2.8)
             draw_freighter(screen, screen_pos, freighter["angle"], COLORS["freighter"])
 
         for pickup in pickups:

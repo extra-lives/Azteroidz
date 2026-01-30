@@ -123,6 +123,15 @@ ENEMY_FIRE_COOLDOWN = 1.4
 ENEMY_BULLET_SPEED = 400
 ENEMY_BULLET_TTL = 2.0
 ENEMY_SHIELD_HITS = 1
+ELITE_ENEMY_SHIELD_HITS = 2
+ELITE_ENEMY_SCORE_BONUS = 100
+ELITE_ENEMY_SPEED_MULT = 1.2
+ELITE_ENEMY_FIRE_RATE_MULT = 1.2
+ELITE_ENEMY_BULLET_SPEED_MULT = 1.2
+ELITE_ENEMY_SIZE_MULT = 1.5
+ELITE_ENEMY_SPAWN_CHANCE = 0.2
+ELITE_ENEMY_OUTER_CHANCE = 0.6
+ELITE_ENEMY_OUTER_BAND_FRAC = 0.2
 ENEMY_NEARBY_TARGET = 12
 ENEMY_NEARBY_RADIUS = 3600
 ENEMY_SPAWN_RADIUS = 4000
@@ -176,7 +185,7 @@ BEACON_OFFSET_MIN = 120
 BEACON_OFFSET_MAX = 260
 UI_PICKUP_RADIUS = 16
 UI_PICKUP_SPACING = 90
-UI_PICKUP_TOP_Y = 26
+UI_PICKUP_TOP_Y = 38
 
 
 COLORS = {
@@ -193,7 +202,9 @@ COLORS = {
     "pickup_canister": (170, 90, 220),
     "pickup_boost": (170, 90, 220),
     "enemy": (235, 90, 90),
-    "enemy_shield": (255, 140, 140),
+    "enemy_shield": (255, 170, 80),
+    "elite_enemy_shield": (220, 160, 255),
+    "elite_enemy": (200, 80, 255),
     "freighter": (150, 110, 80),
     "freighter_shield": (120, 160, 200),
     "god_shield": (255, 215, 80),
@@ -231,6 +242,7 @@ class Enemy:
     wander_timer: float
     wander_angle: float
     pursuing: bool = False
+    elite: bool = False
 
 
 @dataclass(slots=True)
@@ -344,7 +356,7 @@ def draw_beacon(surface, pos, color):
     pygame.draw.line(surface, color, (pos.x, pos.y - size - 6), (pos.x, pos.y + size + 6), 1)
 
 
-def spawn_enemy_shards(shards, pool, pos, angle):
+def spawn_enemy_shards(shards, pool, pos, angle, color=COLORS["enemy"]):
     if len(shards) >= ENEMY_SHARD_MAX:
         return
     base = [
@@ -370,6 +382,7 @@ def spawn_enemy_shards(shards, pool, pos, angle):
                 "vel": drift,
                 "ttl": ENEMY_SHARD_TTL,
             }
+        shard["color"] = color
         shards.append(shard)
 
 
@@ -449,32 +462,42 @@ def spawn_pickup(rng):
     return Pickup(kind=kind, pos=pos, ttl=PICKUP_TTL, shell_hp=shell_hp)
 
 
-def spawn_enemy(rng):
+def spawn_enemy(rng, elite=False):
     pos = pygame.Vector2(rng.uniform(0, WORLD_WIDTH), rng.uniform(0, WORLD_HEIGHT))
     angle = rng.uniform(0, 360)
+    fire_rate_mult = ELITE_ENEMY_FIRE_RATE_MULT if elite else 1.0
     return Enemy(
         pos=pos,
         vel=pygame.Vector2(0, 0),
         angle=angle,
-        shield=ENEMY_SHIELD_HITS,
-        fire_timer=rng.uniform(0, ENEMY_FIRE_COOLDOWN),
+        shield=ELITE_ENEMY_SHIELD_HITS if elite else ENEMY_SHIELD_HITS,
+        fire_timer=rng.uniform(0, ENEMY_FIRE_COOLDOWN / fire_rate_mult),
         wander_timer=rng.uniform(0.5, 1.5),
         wander_angle=angle,
+        elite=elite,
     )
 
 
-def enemy_spawn_clear(pos, landmarks):
+def enemy_spawn_clear(pos, landmarks, radius=ENEMY_RADIUS):
     for landmark in landmarks:
         if landmark.kind not in ("planet", "moon"):
             continue
-        if (pos - landmark.pos).length() < landmark.radius + ENEMY_RADIUS:
+        if (pos - landmark.pos).length() < landmark.radius + radius:
             return False
     return True
 
 
-def spawn_enemy_near(rng, center, landmarks):
+def elite_spawn_chance(center_x):
+    band = WORLD_WIDTH * ELITE_ENEMY_OUTER_BAND_FRAC
+    if center_x <= band or center_x >= WORLD_WIDTH - band:
+        return ELITE_ENEMY_OUTER_CHANCE
+    return 0.0
+
+
+def spawn_enemy_near(rng, center, landmarks, elite=False):
     view_half_w = WIDTH / (2 * CAMERA_ZOOM) + ENEMY_OFFSCREEN_MARGIN
     view_half_h = HEIGHT / (2 * CAMERA_ZOOM) + ENEMY_OFFSCREEN_MARGIN
+    band = WORLD_WIDTH * ELITE_ENEMY_OUTER_BAND_FRAC
     for _ in range(60):
         offset = pygame.Vector2(rng.uniform(ENEMY_SPAWN_BUFFER, ENEMY_SPAWN_RADIUS), 0).rotate(
             rng.uniform(0, 360)
@@ -484,18 +507,25 @@ def spawn_enemy_near(rng, center, landmarks):
             continue
         if abs(pos.x - center.x) < view_half_w and abs(pos.y - center.y) < view_half_h:
             continue
-        if not enemy_spawn_clear(pos, landmarks):
+        if elite and not (pos.x <= band or pos.x >= WORLD_WIDTH - band):
             continue
-        enemy = spawn_enemy(rng)
+        radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if elite else 1.0)
+        if not enemy_spawn_clear(pos, landmarks, radius):
+            continue
+        enemy = spawn_enemy(rng, elite=elite)
         enemy.pos = pos
         return enemy
-    enemy = spawn_enemy(rng)
+    enemy = spawn_enemy(rng, elite=elite)
     for _ in range(60):
         pos = pygame.Vector2(rng.uniform(0, WORLD_WIDTH), rng.uniform(0, WORLD_HEIGHT))
-        if enemy_spawn_clear(pos, landmarks):
+        radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if elite else 1.0)
+        if elite and not (pos.x <= band or pos.x >= WORLD_WIDTH - band):
+            continue
+        if enemy_spawn_clear(pos, landmarks, radius):
             enemy.pos = pos
             return enemy
-    enemy.pos = clamp_position(center + pygame.Vector2(ENEMY_SPAWN_RADIUS, 0), radius=ENEMY_RADIUS)
+    final_radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if elite else 1.0)
+    enemy.pos = clamp_position(center + pygame.Vector2(ENEMY_SPAWN_RADIUS, 0), radius=final_radius)
     return enemy
 
 
@@ -608,7 +638,8 @@ def generate_enemies(seed, center, landmarks):
     rng = random.Random(seed ^ 0x1EADBEEF)
     enemies = []
     for _ in range(ENEMY_NEARBY_TARGET):
-        enemies.append(spawn_enemy_near(rng, center, landmarks))
+        chance = elite_spawn_chance(center.x)
+        enemies.append(spawn_enemy_near(rng, center, landmarks, elite=rng.random() < chance))
     return enemies
 
 
@@ -761,8 +792,8 @@ def draw_vector_shape(surface, pos, angle, points, color, width=2):
     pygame.draw.lines(surface, color, True, rotated, width)
 
 
-def draw_ship(surface, pos, angle, color):
-    render_radius = SHIP_RADIUS * CAMERA_ZOOM
+def draw_ship(surface, pos, angle, color, scale=1.0):
+    render_radius = SHIP_RADIUS * CAMERA_ZOOM * scale
     nose = pygame.Vector2(render_radius * 1.2, 0).rotate(angle)
     left = pygame.Vector2(-render_radius, -render_radius * 0.7).rotate(angle)
     right = pygame.Vector2(-render_radius, render_radius * 0.7).rotate(angle)
@@ -896,7 +927,9 @@ def main():
     shield_size_mult = 3.0
     shield_stock = 0
     rapid_time = 0.0
+    rapid_stock = 0
     spread_time = 0.0
+    spread_stock = 0
     boost_time = 0.0
     boost_stock = 0
     asteroid_spawn_timer = 0.0
@@ -924,14 +957,27 @@ def main():
                     show_gamepad_debug = not show_gamepad_debug
                 elif event.key == pygame.K_m:
                     show_map = not show_map
-                elif event.key == pygame.K_g:
+                elif event.key == pygame.K_F2:
                     god_mode = not god_mode
-                elif event.key == pygame.K_r and not game_over:
+                    if god_mode:
+                        shield_stock += 4
+                        rapid_stock += 4
+                        spread_stock += 4
+                        boost_stock += 4
+                elif event.key == pygame.K_1 and not game_over:
                     if shield_stock > 0 and shield_time <= 0:
                         shield_stock -= 1
                         shield_time = 8.0
                         shield_size_mult = 1.0
-                elif event.key == pygame.K_f and not game_over:
+                elif event.key == pygame.K_3 and not game_over:
+                    if rapid_stock > 0 and rapid_time <= 0:
+                        rapid_stock -= 1
+                        rapid_time = 7.0
+                elif event.key == pygame.K_4 and not game_over:
+                    if spread_stock > 0 and spread_time <= 0:
+                        spread_stock -= 1
+                        spread_time = SPREAD_TIME
+                elif event.key == pygame.K_2 and not game_over:
                     if boost_stock > 0 and boost_time <= 0:
                         boost_stock -= 1
                         boost_time = BOOST_TIME
@@ -1015,7 +1061,9 @@ def main():
             shield_size_mult = 3.0
             shield_stock = 0
             rapid_time = 0.0
+            rapid_stock = 0
             spread_time = 0.0
+            spread_stock = 0
             boost_time = 0.0
             boost_stock = 0
             game_over = False
@@ -1034,7 +1082,9 @@ def main():
                     "shield_time": shield_time,
                     "shield_stock": shield_stock,
                     "rapid_time": rapid_time,
+                    "rapid_stock": rapid_stock,
                     "spread_time": spread_time,
+                    "spread_stock": spread_stock,
                     "boost_time": boost_time,
                     "boost_stock": boost_stock,
                 },
@@ -1070,7 +1120,9 @@ def main():
                 shield_time = player["shield_time"]
                 shield_stock = player.get("shield_stock", 0)
                 rapid_time = player["rapid_time"]
+                rapid_stock = player.get("rapid_stock", 0)
                 spread_time = player.get("spread_time", 0.0)
+                spread_stock = player.get("spread_stock", 0)
                 boost_time = player.get("boost_time", 0.0)
                 boost_stock = player.get("boost_stock", 0)
                 shield_size_mult = 1.0
@@ -1271,7 +1323,8 @@ def main():
                 rng = random.Random(seed + score + int(time.time()))
                 to_spawn = min(6, ENEMY_NEARBY_TARGET - nearby)
                 for _ in range(to_spawn):
-                    enemies.append(spawn_enemy_near(rng, ship_pos, landmarks))
+                    chance = elite_spawn_chance(ship_pos.x)
+                    enemies.append(spawn_enemy_near(rng, ship_pos, landmarks, elite=rng.random() < chance))
         despawn_sq = ENEMY_DESPAWN_RADIUS * ENEMY_DESPAWN_RADIUS
         for enemy in enemies[:]:
             if (enemy.pos - ship_pos).length_squared() > despawn_sq:
@@ -1293,39 +1346,43 @@ def main():
                     asteroids.append(spawn_asteroid_near(rng, size, ship_pos))
 
         for enemy in enemies[:]:
+            enemy_radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)
             to_player = ship_pos - enemy.pos
             dist_sq = to_player.length_squared()
             pursuing = dist_sq <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS
             enemy.pursuing = pursuing
+            speed_mult = ELITE_ENEMY_SPEED_MULT if enemy.elite else 1.0
             if pursuing and dist_sq > 0:
                 target_angle = vector_to_angle(to_player)
                 enemy.angle = turn_towards(enemy.angle, target_angle, ENEMY_TURN_SPEED * dt)
-                speed = ENEMY_PURSUE_SPEED
+                speed = ENEMY_PURSUE_SPEED * speed_mult
             else:
                 enemy.wander_timer -= dt
                 if enemy.wander_timer <= 0:
                     enemy.wander_timer = random.uniform(0.8, 2.2)
                     enemy.wander_angle = (enemy.angle + random.uniform(-120, 120)) % 360
                 enemy.angle = turn_towards(enemy.angle, enemy.wander_angle, ENEMY_TURN_SPEED * dt * 0.6)
-                speed = ENEMY_SCOUT_SPEED
+                speed = ENEMY_SCOUT_SPEED * speed_mult
 
             enemy.vel = angle_to_vector(enemy.angle) * speed
             enemy.pos = enemy.pos + enemy.vel * dt
             if (
-                enemy.pos.x < -ENEMY_RADIUS
-                or enemy.pos.x > WORLD_WIDTH + ENEMY_RADIUS
-                or enemy.pos.y < -ENEMY_RADIUS
-                or enemy.pos.y > WORLD_HEIGHT + ENEMY_RADIUS
+                enemy.pos.x < -enemy_radius
+                or enemy.pos.x > WORLD_WIDTH + enemy_radius
+                or enemy.pos.y < -enemy_radius
+                or enemy.pos.y > WORLD_HEIGHT + enemy_radius
             ):
                 enemies.remove(enemy)
                 continue
+            fire_rate_mult = ELITE_ENEMY_FIRE_RATE_MULT if enemy.elite else 1.0
+            bullet_speed_mult = ELITE_ENEMY_BULLET_SPEED_MULT if enemy.elite else 1.0
             enemy.fire_timer = max(0.0, enemy.fire_timer - dt)
             if (
                 pursuing
                 and dist_sq <= ENEMY_FIRE_RANGE * ENEMY_FIRE_RANGE
                 and enemy.fire_timer <= 0.0
             ):
-                bullet_vel = angle_to_vector(enemy.angle) * ENEMY_BULLET_SPEED + enemy.vel * 0.2
+                bullet_vel = angle_to_vector(enemy.angle) * (ENEMY_BULLET_SPEED * bullet_speed_mult) + enemy.vel * 0.2
                 if enemy_bullet_pool:
                     bullet = enemy_bullet_pool.pop()
                     bullet["pos"].update(enemy.pos)
@@ -1334,7 +1391,7 @@ def main():
                 else:
                     bullet = {"pos": pygame.Vector2(enemy.pos), "vel": bullet_vel, "ttl": ENEMY_BULLET_TTL}
                 enemy_bullets.append(bullet)
-                enemy.fire_timer = ENEMY_FIRE_COOLDOWN
+                enemy.fire_timer = ENEMY_FIRE_COOLDOWN / fire_rate_mult
 
         for freighter in freighters:
             to_target = freighter["target"] - freighter["pos"]
@@ -1399,11 +1456,11 @@ def main():
                     if pickup.kind == "shield":
                         shield_stock += 1
                     elif pickup.kind == "spread":
-                        spread_time = SPREAD_TIME
+                        spread_stock += 1
                     elif pickup.kind == "boost":
                         boost_stock += 1
                     else:
-                        rapid_time = 7.0
+                        rapid_stock += 1
                     pickups.remove(pickup)
                     break
 
@@ -1448,8 +1505,9 @@ def main():
                             asteroids.append(child)
 
             for enemy in enemies:
+                enemy_radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)
                 enemy_prev = prev_pos(enemy.pos, enemy.vel, dt)
-                hit_radius = ENEMY_RADIUS + SHIP_RADIUS
+                hit_radius = enemy_radius + SHIP_RADIUS
                 if moving_circle_hit(enemy_prev, enemy.pos, ship_prev, ship_pos, hit_radius):
                     if shield_time <= 0:
                         lives -= 1
@@ -1486,9 +1544,10 @@ def main():
             for bullet in bullets[:]:
                 hit_enemy = None
                 for enemy in enemies:
+                    enemy_radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)
                     enemy_prev = prev_pos(enemy.pos, enemy.vel, dt)
                     bullet_prev = prev_pos(bullet["pos"], bullet["vel"], dt)
-                    radius = ENEMY_RADIUS + BULLET_HIT_SLOP
+                    radius = enemy_radius + BULLET_HIT_SLOP
                     if moving_circle_hit(bullet_prev, bullet["pos"], enemy_prev, enemy.pos, radius):
                         hit_enemy = enemy
                         break
@@ -1498,25 +1557,27 @@ def main():
                     if hit_enemy.shield > 0:
                         hit_enemy.shield -= 1
                         score += 20
+                        hit_color = COLORS["elite_enemy"] if hit_enemy.elite else COLORS["enemy_shield"]
                         spawn_damage_popup(
                             damage_popups,
                             damage_popup_pool,
                             popup_font,
                             "20",
                             hit_enemy.pos,
-                            COLORS["enemy_shield"],
+                            hit_color,
                         )
                     else:
                         enemies.remove(hit_enemy)
-                        score += 80
-                        spawn_enemy_shards(enemy_shards, enemy_shard_pool, hit_enemy.pos, hit_enemy.angle)
+                        score += 80 + (ELITE_ENEMY_SCORE_BONUS if hit_enemy.elite else 0)
+                        shard_color = COLORS["elite_enemy"] if hit_enemy.elite else COLORS["enemy"]
+                        spawn_enemy_shards(enemy_shards, enemy_shard_pool, hit_enemy.pos, hit_enemy.angle, shard_color)
                         spawn_damage_popup(
                             damage_popups,
                             damage_popup_pool,
                             popup_font,
                             "80",
                             hit_enemy.pos,
-                            COLORS["enemy"],
+                            COLORS["elite_enemy"] if hit_enemy.elite else COLORS["enemy"],
                         )
                     continue
 
@@ -1588,10 +1649,11 @@ def main():
             for enemy in enemies[:]:
                 if enemy.shield > 0:
                     continue
+                enemy_radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)
                 enemy_prev = prev_pos(enemy.pos, enemy.vel, dt)
                 for asteroid in asteroids:
                     asteroid_prev = prev_pos(asteroid.pos, asteroid.vel, dt)
-                    hit_radius = asteroid.radius + ENEMY_RADIUS
+                    hit_radius = asteroid.radius + enemy_radius
                     if moving_circle_hit(enemy_prev, enemy.pos, asteroid_prev, asteroid.pos, hit_radius):
                         enemies.remove(enemy)
                         score += 100
@@ -1727,17 +1789,29 @@ def main():
         for enemy in enemies:
             screen_pos = world_to_screen(enemy.pos, ship_pos)
             if enemy.shield > 0:
-                shield_radius = (ENEMY_RADIUS + 8) * CAMERA_ZOOM * 1.2
+                shield_mult = ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0
+                shield_radius = (ENEMY_RADIUS + 8) * CAMERA_ZOOM * shield_mult
                 pygame.draw.circle(
                     screen,
-                    COLORS["enemy_shield"],
+                    COLORS["elite_enemy_shield"] if enemy.elite else COLORS["enemy_shield"],
                     (int(screen_pos.x), int(screen_pos.y)),
                     max(1, int(shield_radius)),
-                    1,
+                    2 if enemy.elite else 1,
                 )
             if enemy.pursuing:
-                draw_thruster(screen, screen_pos, enemy.angle, COLORS["enemy"], 0.7)
-            draw_ship(screen, screen_pos, enemy.angle, COLORS["enemy"])
+                back_mult = 2.0 * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)
+                draw_thruster(
+                    screen,
+                    screen_pos,
+                    enemy.angle,
+                    COLORS["elite_enemy"] if enemy.elite else COLORS["enemy"],
+                    0.7 * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0),
+                    back_mult,
+                )
+            if enemy.elite:
+                draw_ship(screen, screen_pos, enemy.angle, COLORS["elite_enemy"], ELITE_ENEMY_SIZE_MULT)
+            else:
+                draw_ship(screen, screen_pos, enemy.angle, COLORS["enemy"])
 
         for freighter in freighters:
             screen_pos = world_to_screen(freighter["pos"], ship_pos)
@@ -1798,7 +1872,7 @@ def main():
 
         for shard in enemy_shards:
             alpha = shard["ttl"] / ENEMY_SHARD_TTL
-            color = scale_color(COLORS["enemy"], alpha)
+            color = scale_color(shard.get("color", COLORS["enemy"]), alpha)
             start = world_to_screen(shard["start"], ship_pos)
             end = world_to_screen(shard["end"], ship_pos)
             pygame.draw.line(screen, color, start, end, 2)
@@ -1834,13 +1908,13 @@ def main():
         draw_ship(screen, pygame.Vector2(WIDTH / 2, HEIGHT / 2), ship_angle, ship_color)
 
         ui_pickups = [
-            ("shield", COLORS["god_shield"] if god_mode else COLORS["pickup_shield"], shield_stock, shield_time),
-            ("spread", COLORS["pickup_spread"], 0, spread_time),
-            ("boost", COLORS["pickup_boost"], boost_stock, boost_time),
-            ("rapid", COLORS["pickup_rapid"], 0, rapid_time),
+            ("shield", COLORS["god_shield"] if god_mode else COLORS["pickup_shield"], shield_stock, shield_time, "1"),
+            ("boost", COLORS["pickup_boost"], boost_stock, boost_time, "2"),
+            ("rapid", COLORS["pickup_rapid"], rapid_stock, rapid_time, "3"),
+            ("spread", COLORS["pickup_spread"], spread_stock, spread_time, "4"),
         ]
         start_x = WIDTH / 2 - UI_PICKUP_SPACING * ((len(ui_pickups) - 1) / 2)
-        for index, (kind, color, count, timer) in enumerate(ui_pickups):
+        for index, (kind, color, count, timer, key_label) in enumerate(ui_pickups):
             center = pygame.Vector2(start_x + index * UI_PICKUP_SPACING, UI_PICKUP_TOP_Y)
             active = count > 0 or timer > 0
             draw_color = color if active else scale_color(color, 0.35)
@@ -1854,6 +1928,11 @@ def main():
             screen.blit(
                 count_surface,
                 (center.x + pickup_radius + 8, center.y - count_surface.get_height() / 2),
+            )
+            key_surface = debug_font.render(key_label, True, COLORS["ui"])
+            screen.blit(
+                key_surface,
+                (center.x - key_surface.get_width() / 2, center.y - pickup_radius - 18),
             )
             if timer > 0:
                 timer_text = f"{timer:.1f}s"
@@ -1910,7 +1989,9 @@ def main():
                 f"Shield: {shield_time:.1f}s" if shield_time > 0 else "Shield: -",
                 f"Shield Stock: {shield_stock}",
                 f"Rapid: {rapid_time:.1f}s" if rapid_time > 0 else "Rapid: -",
+                f"Rapid Stock: {rapid_stock}",
                 f"Spread: {spread_time:.1f}s" if spread_time > 0 else "Spread: -",
+                f"Spread Stock: {spread_stock}",
                 f"Boost: {boost_time:.1f}s" if boost_time > 0 else "Boost: -",
                 f"Boost Stock: {boost_stock}",
             ]
@@ -1920,7 +2001,7 @@ def main():
                 text = font.render(line, True, COLORS["ui"])
                 screen.blit(text, (10, 10 + (i + 1) * 20))
 
-        help_text = "Arrows/WASD move  Q/E strafe  X stop  L-stick aim  R1 thrust  L1 brake  Space shoot  Square shield  Triangle boost  M/map button map  F5 save  F6 load  G god shield  N new seed"
+        help_text = "Arrows/WASD move  Q/E strafe  X stop  L-stick aim  R1 thrust  L1 brake  Space shoot  1 shield  2 boost  3 rapid  4 spread  M map  F5 save  F6 load  F2 god shield  N new seed"
         text = font.render(help_text, True, COLORS["ui"])
         screen.blit(text, (10, HEIGHT - 28))
 

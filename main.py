@@ -25,6 +25,7 @@ SHIP_REVERSE_THRUST = 120
 SHIP_BRAKE = 360
 SHIP_STOP_DAMP = 6.0
 SHIP_TURN_SPEED = 200  # degrees/sec
+SHIP_STICK_TURN_SPEED = 320  # degrees/sec (stick aiming)
 SHIP_MAX_SPEED = 380
 
 BULLET_SPEED = 520
@@ -81,10 +82,28 @@ BOOST_TIME = 6.0
 STAR_COUNT = 500
 FREIGHTER_COUNT = 10
 FREIGHTER_SPEED = (70, 110)
-FREIGHTER_RADIUS = SHIP_RADIUS * 4
-JOY_AXIS_X = 0
-JOY_AXIS_Y = 4
+FREIGHTER_RADIUS = SHIP_RADIUS * 5
+# DualShock 4 mapping (pygame)
+JOY_AXIS_LX = 0
+JOY_AXIS_LY = 1
+JOY_AXIS_RX = 2
+JOY_AXIS_RY = 3
+JOY_AXIS_LT = 4
+JOY_AXIS_RT = 5
 JOY_AXIS_DEADZONE = 0.5
+D_PAD_UP = 11
+D_PAD_DOWN = 12
+D_PAD_LEFT = 13
+D_PAD_RIGHT = 14
+BTN_X = 0
+BTN_O = 1
+BTN_S = 2
+BTN_T = 3
+BTN_L3 = 7
+BTN_R3 = 8
+BTN_L1 = 9
+BTN_R1 = 10
+BTN_MAP = 15
 DAMAGE_POPUP_TTL = 0.75
 DAMAGE_POPUP_SPEED = 85
 DAMAGE_POPUP_MAX = 35
@@ -94,6 +113,9 @@ ENEMY_SHARD_SPEED = 90
 ENEMY_SHARD_MAX = 90
 BEACON_OFFSET_MIN = 120
 BEACON_OFFSET_MAX = 260
+UI_PICKUP_RADIUS = 16
+UI_PICKUP_SPACING = 90
+UI_PICKUP_TOP_Y = 26
 
 
 COLORS = {
@@ -850,6 +872,18 @@ def main():
                     if boost_stock > 0 and boost_time <= 0:
                         boost_stock -= 1
                         boost_time = BOOST_TIME
+            elif event.type == pygame.JOYBUTTONDOWN:
+                if event.button == BTN_MAP:
+                    show_map = not show_map
+                elif event.button == BTN_S and not game_over:
+                    if shield_stock > 0 and shield_time <= 0:
+                        shield_stock -= 1
+                        shield_time = 8.0
+                        shield_size_mult = 1.0
+                elif event.button == BTN_T and not game_over:
+                    if boost_stock > 0 and boost_time <= 0:
+                        boost_stock -= 1
+                        boost_time = BOOST_TIME
 
         keys = pygame.key.get_pressed()
         if joystick:
@@ -946,7 +980,7 @@ def main():
             }
             save_state(state)
 
-        if keys[pygame.K_l]:
+        if keys[pygame.K_F6]:
             data = load_state()
             if data:
                 seed = data["seed"]
@@ -995,21 +1029,31 @@ def main():
             hat_y = 0
             fire_button = False
             stop_button = False
+            thrust_button = False
             axis_x = 0.0
             axis_y = 0.0
             axis_values = []
             if joystick:
-                if joystick.get_numhats() > 0:
+                button_count = joystick.get_numbuttons()
+                if button_count > D_PAD_RIGHT:
+                    dpad_left = joystick.get_button(D_PAD_LEFT)
+                    dpad_right = joystick.get_button(D_PAD_RIGHT)
+                    dpad_up = joystick.get_button(D_PAD_UP)
+                    dpad_down = joystick.get_button(D_PAD_DOWN)
+                    hat_x = -1 if dpad_left else (1 if dpad_right else 0)
+                    hat_y = 1 if dpad_up else (-1 if dpad_down else 0)
+                elif joystick.get_numhats() > 0:
                     hat = joystick.get_hat(0)
                     hat_x, hat_y = hat[0], hat[1]
                 if joystick.get_numaxes() > 0:
                     axis_values = [joystick.get_axis(i) for i in range(joystick.get_numaxes())]
-                    if len(axis_values) > JOY_AXIS_X:
-                        axis_x = axis_values[JOY_AXIS_X]
-                    if len(axis_values) > JOY_AXIS_Y:
-                        axis_y = axis_values[JOY_AXIS_Y]
-                fire_button = joystick.get_button(2)
-                stop_button = joystick.get_button(1)
+                    if len(axis_values) > JOY_AXIS_LX:
+                        axis_x = axis_values[JOY_AXIS_LX]
+                    if len(axis_values) > JOY_AXIS_LY:
+                        axis_y = axis_values[JOY_AXIS_LY]
+                fire_button = joystick.get_button(BTN_X) if button_count > BTN_X else False
+                stop_button = joystick.get_button(BTN_L1) if button_count > BTN_L1 else False
+                thrust_button = joystick.get_button(BTN_R1) if button_count > BTN_R1 else False
             if keys[pygame.K_LEFT] or keys[pygame.K_a]:
                 turn -= 1
             if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
@@ -1020,6 +1064,8 @@ def main():
                 reversing = True
             if keys[pygame.K_q]:
                 stopping = True
+            if joystick and thrust_button:
+                thrusting = True
             if hat_x < 0:
                 turn -= 1
             if hat_x > 0:
@@ -1033,8 +1079,6 @@ def main():
                     turn -= 1
                 if axis_x > JOY_AXIS_DEADZONE:
                     turn += 1
-                if axis_y < -JOY_AXIS_DEADZONE:
-                    thrusting = True
                 if axis_y > JOY_AXIS_DEADZONE:
                     reversing = True
             if stop_button:
@@ -1712,6 +1756,35 @@ def main():
             )
         draw_ship(screen, pygame.Vector2(WIDTH / 2, HEIGHT / 2), ship_angle, ship_color)
 
+        ui_pickups = [
+            ("shield", COLORS["pickup_shield"], shield_stock, shield_time),
+            ("boost", COLORS["pickup_boost"], boost_stock, boost_time),
+            ("rapid", COLORS["pickup_rapid"], 0, rapid_time),
+        ]
+        start_x = WIDTH / 2 - UI_PICKUP_SPACING
+        for index, (kind, color, count, timer) in enumerate(ui_pickups):
+            center = pygame.Vector2(start_x + index * UI_PICKUP_SPACING, UI_PICKUP_TOP_Y)
+            active = count > 0 or timer > 0
+            draw_color = color if active else scale_color(color, 0.35)
+            pickup_radius = UI_PICKUP_RADIUS
+            core_radius = max(2, int(pickup_radius * 0.4))
+            pygame.draw.circle(screen, draw_color, (int(center.x), int(center.y)), pickup_radius, 2)
+            pygame.draw.circle(screen, draw_color, (int(center.x), int(center.y)), core_radius, 0)
+
+            count_text = str(count)
+            count_surface = font.render(count_text, True, COLORS["ui"])
+            screen.blit(
+                count_surface,
+                (center.x + pickup_radius + 8, center.y - count_surface.get_height() / 2),
+            )
+            if timer > 0:
+                timer_text = f"{timer:.1f}s"
+                timer_surface = debug_font.render(timer_text, True, COLORS["ui"])
+                screen.blit(
+                    timer_surface,
+                    (center.x - timer_surface.get_width() / 2, center.y + pickup_radius + 6),
+                )
+
         nearest_planet = None
         nearest_dist_sq = None
         for landmark in landmarks:
@@ -1759,7 +1832,7 @@ def main():
             text = font.render(line, True, COLORS["ui"])
             screen.blit(text, (10, 10 + i * 20))
 
-        help_text = "Arrows/WASD move  Space shoot  R shield  F boost  M map  Q stop  F5 save  L load  N new seed"
+        help_text = "Arrows/WASD or D-pad move  L-stick aim  R1 thrust  L1 brake  Space or X shoot  Square shield  Triangle boost  M/map button map  F5 save  F6 load  N new seed"
         text = font.render(help_text, True, COLORS["ui"])
         screen.blit(text, (10, HEIGHT - 28))
 

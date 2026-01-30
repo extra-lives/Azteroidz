@@ -132,12 +132,14 @@ ENEMY_DESPAWN_RADIUS = 5200
 ENEMY_SPAWN_INTERVAL = 3.2
 
 PICKUP_TTL = 15.0
-PICKUP_GRID_SPACING = 1.25
+PICKUP_GRID_SPACING = 0.7
 PICKUP_RADIUS = 24
 CANISTER_RADIUS = 26
 CANISTER_HITS = 4
 BOOST_MULTIPLIER = 1.5
 BOOST_TIME = 6.0
+SPREAD_TIME = 7.0
+SPREAD_ANGLE = 12
 STAR_COUNT = 500
 FREIGHTER_COUNT = 10
 FREIGHTER_SPEED = (70, 110)
@@ -187,6 +189,7 @@ COLORS = {
     "pickup_shield": (120, 200, 255),
     "pickup_rapid": (255, 190, 120),
     "pickup_boost": (255, 170, 90),
+    "pickup_spread": (140, 220, 140),
     "pickup_canister": (170, 90, 220),
     "pickup_boost": (170, 90, 220),
     "enemy": (235, 90, 90),
@@ -440,7 +443,7 @@ def spawn_asteroid_near(rng, size, center):
 
 
 def spawn_pickup(rng):
-    kind = rng.choice(["shield", "rapid", "boost_canister"])
+    kind = rng.choice(["shield", "rapid", "spread", "boost_canister"])
     pos = pygame.Vector2(rng.uniform(0, WORLD_WIDTH), rng.uniform(0, WORLD_HEIGHT))
     shell_hp = CANISTER_HITS if kind == "boost_canister" else 0
     return Pickup(kind=kind, pos=pos, ttl=PICKUP_TTL, shell_hp=shell_hp)
@@ -825,19 +828,21 @@ def draw_thruster(surface, pos, angle, color, scale=1.0, back_mult=1.7):
         pygame.draw.line(surface, color, start, end, 2)
 
 
-def draw_stop_thruster(surface, pos, angle, color):
+def draw_stop_thruster(surface, pos, angle, color, side="both"):
     render_radius = SHIP_RADIUS * CAMERA_ZOOM
-    side = pygame.Vector2(0, render_radius * 1.35).rotate(angle)
+    side_vec = pygame.Vector2(0, render_radius * 1.35).rotate(angle)
     forward = pygame.Vector2(render_radius * 1.1, 0).rotate(angle)
     lengths = [render_radius * 0.75, render_radius * 0.5]
     offsets = [0.0, render_radius * 0.2]
     for length, offset in zip(lengths, offsets):
-        left_start = pos - side + forward * offset
-        right_start = pos + side + forward * offset
-        left_end = left_start - side.normalize() * length
-        right_end = right_start + side.normalize() * length
-        pygame.draw.line(surface, color, left_start, left_end, 2)
-        pygame.draw.line(surface, color, right_start, right_end, 2)
+        left_start = pos - side_vec + forward * offset
+        right_start = pos + side_vec + forward * offset
+        left_end = left_start - side_vec.normalize() * length
+        right_end = right_start + side_vec.normalize() * length
+        if side in ("left", "both"):
+            pygame.draw.line(surface, color, left_start, left_end, 2)
+        if side in ("right", "both"):
+            pygame.draw.line(surface, color, right_start, right_end, 2)
 
 
 def main():
@@ -891,6 +896,7 @@ def main():
     shield_size_mult = 3.0
     shield_stock = 0
     rapid_time = 0.0
+    spread_time = 0.0
     boost_time = 0.0
     boost_stock = 0
     asteroid_spawn_timer = 0.0
@@ -899,6 +905,7 @@ def main():
     stopping_render = False
     stop_thruster_timer = 0.0
     stop_thruster_held = False
+    stop_thruster_side = "both"
     show_map = False
     discovered_planets = set()
     god_mode = False
@@ -1008,6 +1015,7 @@ def main():
             shield_size_mult = 3.0
             shield_stock = 0
             rapid_time = 0.0
+            spread_time = 0.0
             boost_time = 0.0
             boost_stock = 0
             game_over = False
@@ -1026,6 +1034,7 @@ def main():
                     "shield_time": shield_time,
                     "shield_stock": shield_stock,
                     "rapid_time": rapid_time,
+                    "spread_time": spread_time,
                     "boost_time": boost_time,
                     "boost_stock": boost_stock,
                 },
@@ -1061,6 +1070,7 @@ def main():
                 shield_time = player["shield_time"]
                 shield_stock = player.get("shield_stock", 0)
                 rapid_time = player["rapid_time"]
+                spread_time = player.get("spread_time", 0.0)
                 boost_time = player.get("boost_time", 0.0)
                 boost_stock = player.get("boost_stock", 0)
                 shield_size_mult = 1.0
@@ -1068,6 +1078,8 @@ def main():
                 last_death_cause = None
                 discovered_planets = set(data.get("discovered_planets", []))
 
+        strafe_left = False
+        strafe_right = False
         if not game_over:
             turn = 0
             thrusting = False
@@ -1111,6 +1123,10 @@ def main():
             if keys[pygame.K_DOWN] or keys[pygame.K_s]:
                 reversing = True
             if keys[pygame.K_q]:
+                strafe_left = True
+            if keys[pygame.K_e]:
+                strafe_right = True
+            if keys[pygame.K_x]:
                 stopping = True
             if joystick and thrust_button:
                 thrusting = True
@@ -1148,6 +1164,10 @@ def main():
                     ship_vel -= ship_vel.normalize() * SHIP_BRAKE * dt
                 else:
                     ship_vel -= forward * SHIP_REVERSE_THRUST * dt
+            if strafe_left:
+                ship_vel += angle_to_vector(ship_angle - 90) * (SHIP_THRUST * boost_multiplier) * dt
+            if strafe_right:
+                ship_vel += angle_to_vector(ship_angle + 90) * (SHIP_THRUST * boost_multiplier) * dt
             if stopping:
                 ship_vel *= max(0.0, 1.0 - SHIP_STOP_DAMP * dt)
 
@@ -1163,15 +1183,19 @@ def main():
             rapid_multiplier = 0.55 if rapid_time > 0 else 1.0
             cooldown = FIRE_COOLDOWN * rapid_multiplier
             if (keys[pygame.K_SPACE] or fire_button) and fire_timer <= 0.0:
-                bullet_vel = angle_to_vector(ship_angle) * BULLET_SPEED + ship_vel * 0.35
-                if bullet_pool:
-                    bullet = bullet_pool.pop()
-                    bullet["pos"].update(ship_pos)
-                    bullet["vel"].update(bullet_vel)
-                    bullet["ttl"] = BULLET_TTL
-                else:
-                    bullet = {"pos": pygame.Vector2(ship_pos), "vel": bullet_vel, "ttl": BULLET_TTL}
-                bullets.append(bullet)
+                angles = [ship_angle]
+                if spread_time > 0:
+                    angles = [ship_angle - SPREAD_ANGLE, ship_angle, ship_angle + SPREAD_ANGLE]
+                for angle in angles:
+                    bullet_vel = angle_to_vector(angle) * BULLET_SPEED + ship_vel * 0.35
+                    if bullet_pool:
+                        bullet = bullet_pool.pop()
+                        bullet["pos"].update(ship_pos)
+                        bullet["vel"].update(bullet_vel)
+                        bullet["ttl"] = BULLET_TTL
+                    else:
+                        bullet = {"pos": pygame.Vector2(ship_pos), "vel": bullet_vel, "ttl": BULLET_TTL}
+                    bullets.append(bullet)
                 fire_timer = cooldown
 
         if god_mode:
@@ -1182,6 +1206,7 @@ def main():
             if shield_time <= 0 and shield_size_mult != 1.0:
                 shield_size_mult = 1.0
         rapid_time = max(0.0, rapid_time - dt)
+        spread_time = max(0.0, spread_time - dt)
         boost_time = max(0.0, boost_time - dt)
         stop_thruster_timer = max(0.0, stop_thruster_timer - dt)
 
@@ -1341,6 +1366,7 @@ def main():
                         shield_time = 10.0
                         shield_size_mult = 3.0
                         rapid_time = 0.0
+                        spread_time = 0.0
                         boost_time = 0.0
                         if lives <= 0:
                             game_over = True
@@ -1359,6 +1385,7 @@ def main():
                             shield_time = 10.0
                             shield_size_mult = 3.0
                             rapid_time = 0.0
+                            spread_time = 0.0
                             boost_time = 0.0
                             if lives <= 0:
                                 game_over = True
@@ -1371,6 +1398,8 @@ def main():
                         continue
                     if pickup.kind == "shield":
                         shield_stock += 1
+                    elif pickup.kind == "spread":
+                        spread_time = SPREAD_TIME
                     elif pickup.kind == "boost":
                         boost_stock += 1
                     else:
@@ -1391,6 +1420,7 @@ def main():
                         shield_time = 10.0
                         shield_size_mult = 3.0
                         rapid_time = 0.0
+                        spread_time = 0.0
                         boost_time = 0.0
                         if lives <= 0:
                             game_over = True
@@ -1429,6 +1459,7 @@ def main():
                         shield_time = 10.0
                         shield_size_mult = 3.0
                         rapid_time = 0.0
+                        spread_time = 0.0
                         boost_time = 0.0
                         if lives <= 0:
                             game_over = True
@@ -1446,6 +1477,7 @@ def main():
                         shield_time = 10.0
                         shield_size_mult = 3.0
                         rapid_time = 0.0
+                        spread_time = 0.0
                         boost_time = 0.0
                         if lives <= 0:
                             game_over = True
@@ -1579,6 +1611,7 @@ def main():
                         shield_time = 10.0
                         shield_size_mult = 3.0
                         rapid_time = 0.0
+                        spread_time = 0.0
                         boost_time = 0.0
                         if lives <= 0:
                             game_over = True
@@ -1734,6 +1767,8 @@ def main():
 
             if pickup.kind == "shield":
                 color = COLORS["pickup_shield"]
+            elif pickup.kind == "spread":
+                color = COLORS["pickup_spread"]
             elif pickup.kind == "boost":
                 color = COLORS["pickup_boost"]
             else:
@@ -1785,15 +1820,26 @@ def main():
                 pygame.Vector2(WIDTH / 2, HEIGHT / 2),
                 ship_angle,
                 scale_color(COLORS["pickup_boost"], alpha),
+                stop_thruster_side,
+            )
+        if (strafe_left or strafe_right) and not game_over:
+            strafe_side = "right" if strafe_left and not strafe_right else "left"
+            draw_stop_thruster(
+                screen,
+                pygame.Vector2(WIDTH / 2, HEIGHT / 2),
+                ship_angle,
+                scale_color(COLORS["pickup_boost"], 0.7),
+                strafe_side,
             )
         draw_ship(screen, pygame.Vector2(WIDTH / 2, HEIGHT / 2), ship_angle, ship_color)
 
         ui_pickups = [
             ("shield", COLORS["god_shield"] if god_mode else COLORS["pickup_shield"], shield_stock, shield_time),
+            ("spread", COLORS["pickup_spread"], 0, spread_time),
             ("boost", COLORS["pickup_boost"], boost_stock, boost_time),
             ("rapid", COLORS["pickup_rapid"], 0, rapid_time),
         ]
-        start_x = WIDTH / 2 - UI_PICKUP_SPACING
+        start_x = WIDTH / 2 - UI_PICKUP_SPACING * ((len(ui_pickups) - 1) / 2)
         for index, (kind, color, count, timer) in enumerate(ui_pickups):
             center = pygame.Vector2(start_x + index * UI_PICKUP_SPACING, UI_PICKUP_TOP_Y)
             active = count > 0 or timer > 0
@@ -1864,6 +1910,7 @@ def main():
                 f"Shield: {shield_time:.1f}s" if shield_time > 0 else "Shield: -",
                 f"Shield Stock: {shield_stock}",
                 f"Rapid: {rapid_time:.1f}s" if rapid_time > 0 else "Rapid: -",
+                f"Spread: {spread_time:.1f}s" if spread_time > 0 else "Spread: -",
                 f"Boost: {boost_time:.1f}s" if boost_time > 0 else "Boost: -",
                 f"Boost Stock: {boost_stock}",
             ]
@@ -1873,7 +1920,7 @@ def main():
                 text = font.render(line, True, COLORS["ui"])
                 screen.blit(text, (10, 10 + (i + 1) * 20))
 
-        help_text = "Arrows/WASD or D-pad move  L-stick aim  R1 thrust  L1 brake  Space or X shoot  Square shield  Triangle boost  M/map button map  F5 save  F6 load  G god shield  N new seed"
+        help_text = "Arrows/WASD move  Q/E strafe  X stop  L-stick aim  R1 thrust  L1 brake  Space shoot  Square shield  Triangle boost  M/map button map  F5 save  F6 load  G god shield  N new seed"
         text = font.render(help_text, True, COLORS["ui"])
         screen.blit(text, (10, HEIGHT - 28))
 

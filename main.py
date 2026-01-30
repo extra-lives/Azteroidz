@@ -134,6 +134,7 @@ COLORS = {
     "enemy_shield": (255, 140, 140),
     "freighter": (150, 110, 80),
     "freighter_shield": (120, 160, 200),
+    "god_shield": (255, 215, 80),
     "ui": (200, 200, 200),
     "warning": (255, 140, 140),
 }
@@ -848,6 +849,7 @@ def main():
     stop_thruster_held = False
     show_map = False
     discovered_planets = set()
+    god_mode = False
 
     running = True
     while running:
@@ -863,6 +865,8 @@ def main():
                     show_gamepad_debug = not show_gamepad_debug
                 elif event.key == pygame.K_m:
                     show_map = not show_map
+                elif event.key == pygame.K_g:
+                    god_mode = not god_mode
                 elif event.key == pygame.K_r and not game_over:
                     if shield_stock > 0 and shield_time <= 0:
                         shield_stock -= 1
@@ -1134,9 +1138,13 @@ def main():
                 bullets.append(bullet)
                 fire_timer = cooldown
 
-        shield_time = max(0.0, shield_time - dt)
-        if shield_time <= 0 and shield_size_mult != 1.0:
-            shield_size_mult = 1.0
+        if god_mode:
+            shield_time = 10.0
+            shield_size_mult = 3.0
+        else:
+            shield_time = max(0.0, shield_time - dt)
+            if shield_time <= 0 and shield_size_mult != 1.0:
+                shield_size_mult = 1.0
         rapid_time = max(0.0, rapid_time - dt)
         boost_time = max(0.0, boost_time - dt)
         stop_thruster_timer = max(0.0, stop_thruster_timer - dt)
@@ -1716,7 +1724,7 @@ def main():
             shield_radius = (SHIP_RADIUS * CAMERA_ZOOM + 10 * CAMERA_ZOOM) * shield_size_mult * 1.2
             pygame.draw.circle(
                 screen,
-                COLORS["pickup_shield"],
+                COLORS["god_shield"] if god_mode else COLORS["pickup_shield"],
                 (int(shield_screen_pos.x), int(shield_screen_pos.y)),
                 max(1, int(shield_radius)),
                 1,
@@ -1757,7 +1765,7 @@ def main():
         draw_ship(screen, pygame.Vector2(WIDTH / 2, HEIGHT / 2), ship_angle, ship_color)
 
         ui_pickups = [
-            ("shield", COLORS["pickup_shield"], shield_stock, shield_time),
+            ("shield", COLORS["god_shield"] if god_mode else COLORS["pickup_shield"], shield_stock, shield_time),
             ("boost", COLORS["pickup_boost"], boost_stock, boost_time),
             ("rapid", COLORS["pickup_rapid"], 0, rapid_time),
         ]
@@ -1832,7 +1840,7 @@ def main():
             text = font.render(line, True, COLORS["ui"])
             screen.blit(text, (10, 10 + i * 20))
 
-        help_text = "Arrows/WASD or D-pad move  L-stick aim  R1 thrust  L1 brake  Space or X shoot  Square shield  Triangle boost  M/map button map  F5 save  F6 load  N new seed"
+        help_text = "Arrows/WASD or D-pad move  L-stick aim  R1 thrust  L1 brake  Space or X shoot  Square shield  Triangle boost  M/map button map  F5 save  F6 load  G god shield  N new seed"
         text = font.render(help_text, True, COLORS["ui"])
         screen.blit(text, (10, HEIGHT - 28))
 

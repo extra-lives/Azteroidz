@@ -2,11 +2,70 @@ import json
 import math
 import os
 import random
+import sys
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 import pygame
+
+
+def get_process_ram_mb():
+    try:
+        import psutil
+
+        return psutil.Process().memory_info().rss / (1024 * 1024)
+    except Exception:
+        pass
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            import ctypes.wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+
+            class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("cb", ctypes.wintypes.DWORD),
+                    ("PageFaultCount", ctypes.wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            GetCurrentProcess = kernel32.GetCurrentProcess
+            GetCurrentProcess.restype = ctypes.wintypes.HANDLE
+
+            GetProcessMemoryInfo = psapi.GetProcessMemoryInfo
+            GetProcessMemoryInfo.argtypes = [
+                ctypes.wintypes.HANDLE,
+                ctypes.POINTER(PROCESS_MEMORY_COUNTERS),
+                ctypes.wintypes.DWORD,
+            ]
+            GetProcessMemoryInfo.restype = ctypes.wintypes.BOOL
+
+            counters = PROCESS_MEMORY_COUNTERS()
+            counters.cb = ctypes.sizeof(counters)
+            if GetProcessMemoryInfo(GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+                return counters.WorkingSetSize / (1024 * 1024)
+        except Exception:
+            return None
+    try:
+        import resource
+
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if sys.platform == "darwin":
+            return rss / (1024 * 1024)
+        return rss / 1024
+    except Exception:
+        return None
 
 
 WIDTH = 1024
@@ -401,7 +460,16 @@ def spawn_enemy(rng):
     )
 
 
-def spawn_enemy_near(rng, center):
+def enemy_spawn_clear(pos, landmarks):
+    for landmark in landmarks:
+        if landmark.kind not in ("planet", "moon"):
+            continue
+        if (pos - landmark.pos).length() < landmark.radius + ENEMY_RADIUS:
+            return False
+    return True
+
+
+def spawn_enemy_near(rng, center, landmarks):
     view_half_w = WIDTH / (2 * CAMERA_ZOOM) + ENEMY_OFFSCREEN_MARGIN
     view_half_h = HEIGHT / (2 * CAMERA_ZOOM) + ENEMY_OFFSCREEN_MARGIN
     for _ in range(60):
@@ -413,10 +481,17 @@ def spawn_enemy_near(rng, center):
             continue
         if abs(pos.x - center.x) < view_half_w and abs(pos.y - center.y) < view_half_h:
             continue
+        if not enemy_spawn_clear(pos, landmarks):
+            continue
         enemy = spawn_enemy(rng)
         enemy.pos = pos
         return enemy
     enemy = spawn_enemy(rng)
+    for _ in range(60):
+        pos = pygame.Vector2(rng.uniform(0, WORLD_WIDTH), rng.uniform(0, WORLD_HEIGHT))
+        if enemy_spawn_clear(pos, landmarks):
+            enemy.pos = pos
+            return enemy
     enemy.pos = clamp_position(center + pygame.Vector2(ENEMY_SPAWN_RADIUS, 0), radius=ENEMY_RADIUS)
     return enemy
 
@@ -526,23 +601,25 @@ def generate_pickups(seed):
     return pickups
 
 
-def generate_enemies(seed, center):
+def generate_enemies(seed, center, landmarks):
     rng = random.Random(seed ^ 0x1EADBEEF)
     enemies = []
     for _ in range(ENEMY_NEARBY_TARGET):
-        enemies.append(spawn_enemy_near(rng, center))
+        enemies.append(spawn_enemy_near(rng, center, landmarks))
     return enemies
 
 
 def generate_starfield(seed):
     rng = random.Random(seed ^ 0xA5A5A5A5)
-    stars = []
+    surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
     for _ in range(STAR_COUNT):
-        pos = pygame.Vector2(rng.uniform(0, WORLD_WIDTH), rng.uniform(0, WORLD_HEIGHT))
         brightness = rng.randint(35, 95)
         size = 1 if rng.random() < 0.9 else 2
-        stars.append({"pos": pos, "brightness": brightness, "size": size})
-    return stars
+        x = rng.randrange(0, WIDTH)
+        y = rng.randrange(0, HEIGHT)
+        color = (brightness, brightness, brightness)
+        pygame.draw.circle(surface, color, (x, y), size)
+    return {"surface": surface, "width": WIDTH, "height": HEIGHT}
 
 
 def pick_nearest_moon(planet, moons):
@@ -601,8 +678,8 @@ def new_world(seed):
         asteroids.append(spawn_asteroid(rng, size))
     pickups = generate_pickups(seed)
     center = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
-    enemies = generate_enemies(seed, center)
     landmarks = generate_landmarks(seed)
+    enemies = generate_enemies(seed, center, landmarks)
     stars = generate_starfield(seed)
     freighters = generate_freighters(seed, landmarks)
     return asteroids, pickups, enemies, landmarks, stars, freighters
@@ -671,31 +748,6 @@ def deserialize_pickup(data):
     kind = data["kind"]
     shell_hp = data.get("shell_hp", CANISTER_HITS if kind == "boost_canister" else 0)
     return Pickup(kind=kind, pos=deserialize_vec(data["pos"]), ttl=data["ttl"], shell_hp=shell_hp)
-
-
-def serialize_enemy(enemy):
-    return {
-        "pos": serialize_vec(enemy.pos),
-        "angle": enemy.angle,
-        "shield": enemy.shield,
-        "fire_timer": enemy.fire_timer,
-        "wander_timer": enemy.wander_timer,
-        "wander_angle": enemy.wander_angle,
-    }
-
-
-def deserialize_enemy(data):
-    angle = data.get("angle", 0.0)
-    return Enemy(
-        pos=deserialize_vec(data["pos"]),
-        vel=pygame.Vector2(0, 0),
-        angle=angle,
-        shield=data.get("shield", ENEMY_SHIELD_HITS),
-        fire_timer=data.get("fire_timer", 0.0),
-        wander_timer=data.get("wander_timer", 0.0),
-        wander_angle=data.get("wander_angle", angle),
-        pursuing=False,
-    )
 
 
 def draw_vector_shape(surface, pos, angle, points, color, width=2):
@@ -979,7 +1031,6 @@ def main():
                 },
                 "asteroids": [serialize_asteroid(a) for a in asteroids],
                 "pickups": [serialize_pickup(p) for p in pickups],
-                "enemies": [serialize_enemy(e) for e in enemies],
                 "discovered_planets": sorted(discovered_planets),
             }
             save_state(state)
@@ -990,10 +1041,6 @@ def main():
                 seed = data["seed"]
                 asteroids = [deserialize_asteroid(a) for a in data["asteroids"]]
                 pickups = [deserialize_pickup(p) for p in data["pickups"]]
-                if "enemies" in data:
-                    enemies = [deserialize_enemy(e) for e in data["enemies"]]
-                else:
-                    enemies = generate_enemies(seed, pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2))
                 bullet_pool = []
                 enemy_bullet_pool = []
                 damage_popups = []
@@ -1002,6 +1049,7 @@ def main():
                 enemy_shards = []
                 enemy_shard_pool = []
                 landmarks = generate_landmarks(seed)
+                enemies = generate_enemies(seed, pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2), landmarks)
                 stars = generate_starfield(seed)
                 freighters = generate_freighters(seed, landmarks)
                 player = data["player"]
@@ -1019,10 +1067,6 @@ def main():
                 game_over = False
                 last_death_cause = None
                 discovered_planets = set(data.get("discovered_planets", []))
-                if len(enemies) < ENEMY_NEARBY_TARGET:
-                    rng = random.Random(seed ^ int(time.time()))
-                    for _ in range(ENEMY_NEARBY_TARGET - len(enemies)):
-                        enemies.append(spawn_enemy_near(rng, ship_pos))
 
         if not game_over:
             turn = 0
@@ -1112,16 +1156,8 @@ def main():
                 ship_vel.scale_to_length(max_speed)
 
             new_pos = ship_pos + ship_vel * dt
-            wrapped = False
-            if new_pos.x < 0 or new_pos.x >= WORLD_WIDTH:
-                new_pos.x %= WORLD_WIDTH
-                wrapped = True
-            if new_pos.y < 0 or new_pos.y >= WORLD_HEIGHT:
-                new_pos.y %= WORLD_HEIGHT
-                wrapped = True
-            ship_pos = new_pos
-            if wrapped:
-                ship_prev = pygame.Vector2(ship_pos)
+            ship_pos = clamp_position(new_pos, SHIP_RADIUS)
+            ship_prev = pygame.Vector2(ship_pos)
 
             fire_timer = max(0.0, fire_timer - dt)
             rapid_multiplier = 0.55 if rapid_time > 0 else 1.0
@@ -1210,7 +1246,7 @@ def main():
                 rng = random.Random(seed + score + int(time.time()))
                 to_spawn = min(6, ENEMY_NEARBY_TARGET - nearby)
                 for _ in range(to_spawn):
-                    enemies.append(spawn_enemy_near(rng, ship_pos))
+                    enemies.append(spawn_enemy_near(rng, ship_pos, landmarks))
         despawn_sq = ENEMY_DESPAWN_RADIUS * ENEMY_DESPAWN_RADIUS
         for enemy in enemies[:]:
             if (enemy.pos - ship_pos).length_squared() > despawn_sq:
@@ -1231,7 +1267,7 @@ def main():
                     size = 4 if rng.random() < 0.12 else 3
                     asteroids.append(spawn_asteroid_near(rng, size, ship_pos))
 
-        for enemy in enemies:
+        for enemy in enemies[:]:
             to_player = ship_pos - enemy.pos
             dist_sq = to_player.length_squared()
             pursuing = dist_sq <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS
@@ -1250,22 +1286,14 @@ def main():
 
             enemy.vel = angle_to_vector(enemy.angle) * speed
             enemy.pos = enemy.pos + enemy.vel * dt
-            if enemy.pos.x < ENEMY_RADIUS:
-                enemy.pos.x = ENEMY_RADIUS
-                enemy.vel.x = abs(enemy.vel.x)
-                enemy.angle = vector_to_angle(enemy.vel)
-            elif enemy.pos.x > WORLD_WIDTH - ENEMY_RADIUS:
-                enemy.pos.x = WORLD_WIDTH - ENEMY_RADIUS
-                enemy.vel.x = -abs(enemy.vel.x)
-                enemy.angle = vector_to_angle(enemy.vel)
-            if enemy.pos.y < ENEMY_RADIUS:
-                enemy.pos.y = ENEMY_RADIUS
-                enemy.vel.y = abs(enemy.vel.y)
-                enemy.angle = vector_to_angle(enemy.vel)
-            elif enemy.pos.y > WORLD_HEIGHT - ENEMY_RADIUS:
-                enemy.pos.y = WORLD_HEIGHT - ENEMY_RADIUS
-                enemy.vel.y = -abs(enemy.vel.y)
-                enemy.angle = vector_to_angle(enemy.vel)
+            if (
+                enemy.pos.x < -ENEMY_RADIUS
+                or enemy.pos.x > WORLD_WIDTH + ENEMY_RADIUS
+                or enemy.pos.y < -ENEMY_RADIUS
+                or enemy.pos.y > WORLD_HEIGHT + ENEMY_RADIUS
+            ):
+                enemies.remove(enemy)
+                continue
             enemy.fire_timer = max(0.0, enemy.fire_timer - dt)
             if (
                 pursuing
@@ -1593,18 +1621,14 @@ def main():
             4,
         )
 
-        for star in stars:
-            delta = toroidal_delta_world(ship_pos, star["pos"])
-            screen_pos = pygame.Vector2(WIDTH / 2, HEIGHT / 2) + delta * STAR_PARALLAX
-            screen_pos.x %= WIDTH
-            screen_pos.y %= HEIGHT
-            color = (star["brightness"], star["brightness"], star["brightness"])
-            pygame.draw.circle(
-                screen,
-                color,
-                (int(screen_pos.x), int(screen_pos.y)),
-                star["size"],
-            )
+        star_surface = stars["surface"]
+        tile_w = stars["width"]
+        tile_h = stars["height"]
+        offset_x = int((-ship_pos.x * STAR_PARALLAX) % tile_w)
+        offset_y = int((-ship_pos.y * STAR_PARALLAX) % tile_h)
+        for draw_x in (offset_x - tile_w, offset_x):
+            for draw_y in (offset_y - tile_h, offset_y):
+                screen.blit(star_surface, (draw_x, draw_y))
 
         for landmark in landmarks:
             screen_pos = world_to_screen(landmark.pos, ship_pos)
@@ -1807,10 +1831,13 @@ def main():
             draw_edge_arrow(screen, nearest_planet, COLORS["planet"])
 
         if show_gamepad_debug:
+            ram_mb = get_process_ram_mb()
             lines = [
                 f"Gamepad: {joy_name}",
                 f"Axes: {joy_axes}  Buttons: {joy_buttons}  Hats: {joy_hats}",
             ]
+            if ram_mb is not None:
+                lines.append(f"RAM: {ram_mb:.1f} MB")
             if joystick:
                 if joy_hats > 0:
                     lines.append(f"Hat0: {joystick.get_hat(0)}")
@@ -1824,21 +1851,27 @@ def main():
                 text = debug_font.render(line, True, COLORS["ui"])
                 screen.blit(text, (10, HEIGHT - 120 + i * 18))
 
-        hud = [
-            f"Seed: {seed}",
-            f"Score: {score}",
-            f"Lives: {lives}",
-            f"Shield: {shield_time:.1f}s" if shield_time > 0 else "Shield: -",
-            f"Shield Stock: {shield_stock}",
-            f"Rapid: {rapid_time:.1f}s" if rapid_time > 0 else "Rapid: -",
-            f"Boost: {boost_time:.1f}s" if boost_time > 0 else "Boost: -",
-            f"Boost Stock: {boost_stock}",
-        ]
+        lives_text = font.render(f"Lives: {lives}", True, COLORS["ui"])
+        screen.blit(lives_text, (10, 10))
+
+        score_text = font.render(f"Score: {score}", True, COLORS["ui"])
+        screen.blit(score_text, (WIDTH - score_text.get_width() - 10, 10))
+
         if show_gamepad_debug:
+            ram_mb = get_process_ram_mb()
+            hud = [
+                f"Seed: {seed}",
+                f"Shield: {shield_time:.1f}s" if shield_time > 0 else "Shield: -",
+                f"Shield Stock: {shield_stock}",
+                f"Rapid: {rapid_time:.1f}s" if rapid_time > 0 else "Rapid: -",
+                f"Boost: {boost_time:.1f}s" if boost_time > 0 else "Boost: -",
+                f"Boost Stock: {boost_stock}",
+            ]
+            hud.append(f"RAM: {ram_mb:.1f} MB" if ram_mb is not None else "RAM: n/a")
             hud.append(f"Last Death: {last_death_cause}" if last_death_cause else "Last Death: -")
-        for i, line in enumerate(hud):
-            text = font.render(line, True, COLORS["ui"])
-            screen.blit(text, (10, 10 + i * 20))
+            for i, line in enumerate(hud):
+                text = font.render(line, True, COLORS["ui"])
+                screen.blit(text, (10, 10 + (i + 1) * 20))
 
         help_text = "Arrows/WASD or D-pad move  L-stick aim  R1 thrust  L1 brake  Space or X shoot  Square shield  Triangle boost  M/map button map  F5 save  F6 load  G god shield  N new seed"
         text = font.render(help_text, True, COLORS["ui"])

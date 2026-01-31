@@ -121,8 +121,10 @@ ENEMY_RADIUS = 12
 ENEMY_SCOUT_SPEED = 120
 ENEMY_PURSUE_SPEED = 140
 ENEMY_TURN_SPEED = 110
-ENEMY_PURSUE_RADIUS = 550
-ENEMY_FIRE_RANGE = 300
+ENEMY_PURSUE_RADIUS = 600
+ENEMY_FIRE_RANGE = 400
+ENEMY_HOLD_RADIUS = 100
+ENEMY_HOLD_PLAYER_SPEED = 40
 ENEMY_FIRE_COOLDOWN = 1.4
 ENEMY_BULLET_SPEED = 400
 ENEMY_BULLET_TTL = 2.0
@@ -1459,7 +1461,10 @@ def main():
             if pursuing and dist_sq > 0:
                 target_angle = vector_to_angle(to_player)
                 enemy.angle = turn_towards(enemy.angle, target_angle, ENEMY_TURN_SPEED * dt)
-                speed = ENEMY_PURSUE_SPEED * speed_mult
+                if dist_sq <= ENEMY_HOLD_RADIUS * ENEMY_HOLD_RADIUS and ship_vel.length() <= ENEMY_HOLD_PLAYER_SPEED:
+                    speed = 0.0
+                else:
+                    speed = ENEMY_PURSUE_SPEED * speed_mult
             else:
                 enemy.wander_timer -= dt
                 if enemy.wander_timer <= 0:

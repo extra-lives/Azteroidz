@@ -68,6 +68,7 @@ def get_process_ram_mb():
         return None
 
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WIDTH = 1024
 HEIGHT = 768
 WORLD_WIDTH = 80000
@@ -77,6 +78,9 @@ CAMERA_ZOOM = 0.5
 STAR_PARALLAX = 0.18
 
 SAVE_PATH = "save.json"
+SHOOT_SOUND_PATH = os.path.join(BASE_DIR, "assets", "audio", "shoot-default.wav")
+EXPLODE_SOUND_PATH = os.path.join(BASE_DIR, "assets", "audio", "explode-default.wav")
+ASTEROID_EXPLODE_SOUND_PATH = os.path.join(BASE_DIR, "assets", "audio", "explode-asteroid.wav")
 
 SHIP_RADIUS = 12
 SHIP_THRUST = 260
@@ -149,6 +153,9 @@ BOOST_MULTIPLIER = 1.5
 BOOST_TIME = 6.0
 SPREAD_TIME = 7.0
 SPREAD_ANGLE = 12
+MINE_DROP_COOLDOWN = 0.5
+MINE_RADIUS = 32
+MINE_BLAST_RADIUS = MINE_RADIUS * 3
 STAR_COUNT = 500
 FREIGHTER_COUNT = 10
 FREIGHTER_SPEED = (70, 110)
@@ -201,6 +208,8 @@ COLORS = {
     "pickup_spread": (140, 220, 140),
     "pickup_canister": (170, 90, 220),
     "pickup_boost": (170, 90, 220),
+    "pickup_mine": (220, 70, 70),
+    "mine_core": (255, 170, 80),
     "enemy": (235, 90, 90),
     "enemy_shield": (255, 170, 80),
     "elite_enemy_shield": (220, 160, 255),
@@ -456,7 +465,7 @@ def spawn_asteroid_near(rng, size, center):
 
 
 def spawn_pickup(rng):
-    kind = rng.choice(["shield", "rapid", "spread", "boost_canister"])
+    kind = rng.choice(["shield", "spread", "mine", "boost_canister"])
     pos = pygame.Vector2(rng.uniform(0, WORLD_WIDTH), rng.uniform(0, WORLD_HEIGHT))
     shell_hp = CANISTER_HITS if kind == "boost_canister" else 0
     return Pickup(kind=kind, pos=pos, ttl=PICKUP_TTL, shell_hp=shell_hp)
@@ -876,17 +885,72 @@ def draw_stop_thruster(surface, pos, angle, color, side="both"):
             pygame.draw.line(surface, color, right_start, right_end, 2)
 
 
+def draw_mine(surface, pos, radius, color, core_color):
+    points = []
+    for i in range(5):
+        angle = math.radians(72 * i - 90)
+        points.append((pos.x + math.cos(angle) * radius, pos.y + math.sin(angle) * radius))
+    pygame.draw.polygon(surface, color, points, 2)
+    pygame.draw.circle(surface, core_color, (int(pos.x), int(pos.y)), max(2, int(radius * 0.35)), 0)
+
+
 def main():
+    pygame.mixer.pre_init(44100, -16, 2, 512)
     pygame.init()
     pygame.joystick.init()
     screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
     global WIDTH, HEIGHT
     WIDTH, HEIGHT = screen.get_size()
     pygame.display.set_caption("Seeded Asteroids - Prototype")
+    pygame.event.clear()
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("Consolas", 18)
     debug_font = pygame.font.SysFont("Consolas", 16)
     popup_font = pygame.font.SysFont("Consolas", 16, bold=True)
+    shoot_sound = None
+    explode_sound = None
+    explode_channel = None
+    asteroid_explode_sound = None
+    asteroid_explode_channel = None
+    if pygame.mixer.get_init() is None:
+        try:
+            pygame.mixer.init()
+        except pygame.error:
+            pass
+    if pygame.mixer.get_init():
+        pygame.mixer.set_num_channels(16)
+    if pygame.mixer.get_init() and os.path.exists(SHOOT_SOUND_PATH):
+        try:
+            shoot_sound = pygame.mixer.Sound(SHOOT_SOUND_PATH)
+            shoot_sound.set_volume(0.6)
+        except pygame.error:
+            shoot_sound = None
+    if pygame.mixer.get_init() and os.path.exists(EXPLODE_SOUND_PATH):
+        try:
+            explode_sound = pygame.mixer.Sound(EXPLODE_SOUND_PATH)
+            explode_sound.set_volume(1.0)
+            explode_channel = pygame.mixer.Channel(1)
+        except pygame.error:
+            explode_sound = None
+            explode_channel = None
+    if pygame.mixer.get_init() and os.path.exists(ASTEROID_EXPLODE_SOUND_PATH):
+        try:
+            asteroid_explode_sound = pygame.mixer.Sound(ASTEROID_EXPLODE_SOUND_PATH)
+            asteroid_explode_sound.set_volume(0.9)
+            asteroid_explode_channel = pygame.mixer.Channel(2)
+        except pygame.error:
+            asteroid_explode_sound = None
+            asteroid_explode_channel = None
+
+    def play_explode_sound():
+        if explode_sound:
+            if explode_channel:
+                explode_channel.play(explode_sound)
+            else:
+                explode_sound.play()
+
+    def play_asteroid_explode_sound():
+        return
     joystick = None
     joy_name = "none"
     joy_axes = 0
@@ -917,6 +981,7 @@ def main():
     beacons = {}
     enemy_shards = []
     enemy_shard_pool = []
+    mines = []
     fire_timer = 0.0
     score = 0
     lives = 3
@@ -930,8 +995,10 @@ def main():
     rapid_stock = 0
     spread_time = 0.0
     spread_stock = 0
+    mine_stock = 0
     boost_time = 0.0
     boost_stock = 0
+    mine_cooldown = 0.0
     asteroid_spawn_timer = 0.0
     enemy_spawn_timer = 0.0
     thrusting_render = False
@@ -949,12 +1016,14 @@ def main():
         ship_prev = pygame.Vector2(ship_pos)
         shield_prev = shield_time
 
-        for event in pygame.event.get():
+        for event in pygame.event.get([pygame.QUIT, pygame.KEYDOWN, pygame.JOYBUTTONDOWN]):
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_F1:
                     show_gamepad_debug = not show_gamepad_debug
+                elif event.key == pygame.K_F3:
+                    play_explode_sound()
                 elif event.key == pygame.K_m:
                     show_map = not show_map
                 elif event.key == pygame.K_F2:
@@ -963,6 +1032,7 @@ def main():
                         shield_stock += 4
                         rapid_stock += 4
                         spread_stock += 4
+                        mine_stock += 4
                         boost_stock += 4
                 elif event.key == pygame.K_1 and not game_over:
                     if shield_stock > 0 and shield_time <= 0:
@@ -977,6 +1047,11 @@ def main():
                     if spread_stock > 0 and spread_time <= 0:
                         spread_stock -= 1
                         spread_time = SPREAD_TIME
+                elif event.key == pygame.K_5 and not game_over:
+                    if mine_stock > 0 and mine_cooldown <= 0:
+                        mines.append({"pos": pygame.Vector2(ship_pos)})
+                        mine_stock -= 1
+                        mine_cooldown = MINE_DROP_COOLDOWN
                 elif event.key == pygame.K_2 and not game_over:
                     if boost_stock > 0 and boost_time <= 0:
                         boost_stock -= 1
@@ -993,6 +1068,15 @@ def main():
                     if boost_stock > 0 and boost_time <= 0:
                         boost_stock -= 1
                         boost_time = BOOST_TIME
+                elif event.button == BTN_O and not game_over:
+                    if spread_stock > 0 and spread_time <= 0:
+                        spread_stock -= 1
+                        spread_time = SPREAD_TIME
+                elif event.button == BTN_L3 and not game_over:
+                    if mine_stock > 0 and mine_cooldown <= 0:
+                        mines.append({"pos": pygame.Vector2(ship_pos)})
+                        mine_stock -= 1
+                        mine_cooldown = MINE_DROP_COOLDOWN
 
         keys = pygame.key.get_pressed()
         if joystick:
@@ -1052,6 +1136,7 @@ def main():
             beacons = {}
             enemy_shards = []
             enemy_shard_pool = []
+            mines = []
             ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
             ship_vel = pygame.Vector2(0, 0)
             ship_angle = -90
@@ -1064,8 +1149,10 @@ def main():
             rapid_stock = 0
             spread_time = 0.0
             spread_stock = 0
+            mine_stock = 0
             boost_time = 0.0
             boost_stock = 0
+            mine_cooldown = 0.0
             game_over = False
             last_death_cause = None
             discovered_planets = set()
@@ -1085,6 +1172,7 @@ def main():
                     "rapid_stock": rapid_stock,
                     "spread_time": spread_time,
                     "spread_stock": spread_stock,
+                    "mine_stock": mine_stock,
                     "boost_time": boost_time,
                     "boost_stock": boost_stock,
                 },
@@ -1107,6 +1195,7 @@ def main():
                 beacons = {}
                 enemy_shards = []
                 enemy_shard_pool = []
+                mines = []
                 landmarks = generate_landmarks(seed)
                 enemies = generate_enemies(seed, pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2), landmarks)
                 stars = generate_starfield(seed)
@@ -1123,8 +1212,10 @@ def main():
                 rapid_stock = player.get("rapid_stock", 0)
                 spread_time = player.get("spread_time", 0.0)
                 spread_stock = player.get("spread_stock", 0)
+                mine_stock = player.get("mine_stock", 0)
                 boost_time = player.get("boost_time", 0.0)
                 boost_stock = player.get("boost_stock", 0)
+                mine_cooldown = 0.0
                 shield_size_mult = 1.0
                 game_over = False
                 last_death_cause = None
@@ -1144,6 +1235,8 @@ def main():
             thrust_button = False
             axis_x = 0.0
             axis_y = 0.0
+            axis_lt = -1.0
+            axis_rt = -1.0
             axis_values = []
             if joystick:
                 button_count = joystick.get_numbuttons()
@@ -1163,6 +1256,10 @@ def main():
                         axis_x = axis_values[JOY_AXIS_LX]
                     if len(axis_values) > JOY_AXIS_LY:
                         axis_y = axis_values[JOY_AXIS_LY]
+                    if len(axis_values) > JOY_AXIS_LT:
+                        axis_lt = axis_values[JOY_AXIS_LT]
+                    if len(axis_values) > JOY_AXIS_RT:
+                        axis_rt = axis_values[JOY_AXIS_RT]
                 fire_button = joystick.get_button(BTN_X) if button_count > BTN_X else False
                 stop_button = joystick.get_button(BTN_L1) if button_count > BTN_L1 else False
                 thrust_button = joystick.get_button(BTN_R1) if button_count > BTN_R1 else False
@@ -1178,7 +1275,7 @@ def main():
                 strafe_left = True
             if keys[pygame.K_e]:
                 strafe_right = True
-            if keys[pygame.K_x]:
+            if keys[pygame.K_LSHIFT]:
                 stopping = True
             if joystick and thrust_button:
                 thrusting = True
@@ -1197,6 +1294,10 @@ def main():
                     turn += 1
                 if axis_y > JOY_AXIS_DEADZONE:
                     reversing = True
+            if axis_lt > JOY_AXIS_DEADZONE:
+                strafe_left = True
+            if axis_rt > JOY_AXIS_DEADZONE:
+                strafe_right = True
             if stop_button:
                 stopping = True
             thrusting_render = thrusting
@@ -1248,6 +1349,8 @@ def main():
                     else:
                         bullet = {"pos": pygame.Vector2(ship_pos), "vel": bullet_vel, "ttl": BULLET_TTL}
                     bullets.append(bullet)
+                if shoot_sound:
+                    shoot_sound.play()
                 fire_timer = cooldown
 
         if god_mode:
@@ -1260,6 +1363,7 @@ def main():
         rapid_time = max(0.0, rapid_time - dt)
         spread_time = max(0.0, spread_time - dt)
         boost_time = max(0.0, boost_time - dt)
+        mine_cooldown = max(0.0, mine_cooldown - dt)
         stop_thruster_timer = max(0.0, stop_thruster_timer - dt)
 
         for i in range(len(bullets) - 1, -1, -1):
@@ -1416,6 +1520,7 @@ def main():
                 for asteroid in asteroids:
                     hit_radius = asteroid.radius + SHIP_RADIUS
                     if moving_circle_hit(ship_pos, ship_pos, asteroid.pos, asteroid.pos, hit_radius):
+                        play_explode_sound()
                         lives -= 1
                         last_death_cause = "asteroid"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
@@ -1432,6 +1537,7 @@ def main():
                     for landmark in landmarks:
                         hit_radius = landmark.radius + SHIP_RADIUS
                         if moving_circle_hit(ship_pos, ship_pos, landmark.pos, landmark.pos, hit_radius):
+                            play_explode_sound()
                             lives -= 1
                             if landmark.kind == "moon":
                                 last_death_cause = "moon"
@@ -1457,6 +1563,8 @@ def main():
                         shield_stock += 1
                     elif pickup.kind == "spread":
                         spread_stock += 1
+                    elif pickup.kind == "mine":
+                        mine_stock += 3
                     elif pickup.kind == "boost":
                         boost_stock += 1
                     else:
@@ -1470,6 +1578,7 @@ def main():
                     enemy_bullets.remove(bullet)
                     enemy_bullet_pool.append(bullet)
                     if shield_time <= 0:
+                        play_explode_sound()
                         lives -= 1
                         last_death_cause = "enemy bullet"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
@@ -1497,6 +1606,7 @@ def main():
                     enemy_bullet_pool.append(bullet)
                     asteroids.remove(hit)
                     if hit.size > 1:
+                        play_asteroid_explode_sound()
                         rng = random.Random(seed + int(hit.pos.x) + int(hit.pos.y))
                         for _ in range(2):
                             child = spawn_asteroid(rng, hit.size - 1, avoid_center=False)
@@ -1510,6 +1620,7 @@ def main():
                 hit_radius = enemy_radius + SHIP_RADIUS
                 if moving_circle_hit(enemy_prev, enemy.pos, ship_prev, ship_pos, hit_radius):
                     if shield_time <= 0:
+                        play_explode_sound()
                         lives -= 1
                         last_death_cause = "enemy ship"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
@@ -1528,6 +1639,7 @@ def main():
                 hit_radius = asteroid.radius + SHIP_RADIUS
                 if moving_circle_hit(ship_prev, ship_pos, asteroid_prev, asteroid.pos, hit_radius):
                     if shield_time <= 0:
+                        play_explode_sound()
                         lives -= 1
                         last_death_cause = "asteroid"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
@@ -1568,6 +1680,7 @@ def main():
                         )
                     else:
                         enemies.remove(hit_enemy)
+                        play_explode_sound()
                         score += 80 + (ELITE_ENEMY_SCORE_BONUS if hit_enemy.elite else 0)
                         shard_color = COLORS["elite_enemy"] if hit_enemy.elite else COLORS["enemy"]
                         spawn_enemy_shards(enemy_shards, enemy_shard_pool, hit_enemy.pos, hit_enemy.angle, shard_color)
@@ -1638,6 +1751,7 @@ def main():
                         COLORS["bullet"],
                     )
                     if hit.size > 1:
+                        play_asteroid_explode_sound()
                         rng = random.Random(seed + score + int(hit.pos.x))
                         for _ in range(2):
                             child = spawn_asteroid(rng, hit.size - 1, avoid_center=False)
@@ -1645,6 +1759,39 @@ def main():
                             child.vel = hit.vel.rotate(rng.uniform(-50, 50)) * 1.2
                             asteroids.append(child)
                     break
+
+            for mine in mines[:]:
+                trigger_enemy = None
+                for enemy in enemies:
+                    enemy_radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)
+                    if (enemy.pos - mine["pos"]).length() <= enemy_radius + MINE_RADIUS:
+                        trigger_enemy = enemy
+                        break
+                if not trigger_enemy:
+                    continue
+
+                mines.remove(mine)
+                to_kill = [trigger_enemy]
+                for enemy in enemies:
+                    if enemy is trigger_enemy:
+                        continue
+                    if (enemy.pos - mine["pos"]).length() <= MINE_BLAST_RADIUS:
+                        to_kill.append(enemy)
+                for enemy in to_kill:
+                    if enemy in enemies:
+                        enemies.remove(enemy)
+                        play_explode_sound()
+                        score += 80 + (ELITE_ENEMY_SCORE_BONUS if enemy.elite else 0)
+                        shard_color = COLORS["elite_enemy"] if enemy.elite else COLORS["enemy"]
+                        spawn_enemy_shards(enemy_shards, enemy_shard_pool, enemy.pos, enemy.angle, shard_color)
+                        spawn_damage_popup(
+                            damage_popups,
+                            damage_popup_pool,
+                            popup_font,
+                            "80",
+                            enemy.pos,
+                            COLORS["elite_enemy"] if enemy.elite else COLORS["enemy"],
+                        )
 
             for enemy in enemies[:]:
                 if enemy.shield > 0:
@@ -1656,6 +1803,7 @@ def main():
                     hit_radius = asteroid.radius + enemy_radius
                     if moving_circle_hit(enemy_prev, enemy.pos, asteroid_prev, asteroid.pos, hit_radius):
                         enemies.remove(enemy)
+                        play_explode_sound()
                         score += 100
                         break
 
@@ -1663,6 +1811,7 @@ def main():
                 hit_radius = landmark.radius + SHIP_RADIUS
                 if moving_circle_hit(ship_prev, ship_pos, landmark.pos, landmark.pos, hit_radius):
                     if shield_time <= 0:
+                        play_explode_sound()
                         lives -= 1
                         if landmark.kind == "moon":
                             last_death_cause = "moon"
@@ -1786,6 +1935,16 @@ def main():
                 1,
             )
 
+        for mine in mines:
+            screen_pos = world_to_screen(mine["pos"], ship_pos)
+            draw_mine(
+                screen,
+                screen_pos,
+                max(2, int(MINE_RADIUS * CAMERA_ZOOM)),
+                COLORS["pickup_mine"],
+                COLORS["mine_core"],
+            )
+
         for enemy in enemies:
             screen_pos = world_to_screen(enemy.pos, ship_pos)
             if enemy.shield > 0:
@@ -1843,6 +2002,8 @@ def main():
                 color = COLORS["pickup_shield"]
             elif pickup.kind == "spread":
                 color = COLORS["pickup_spread"]
+            elif pickup.kind == "mine":
+                color = COLORS["pickup_mine"]
             elif pickup.kind == "boost":
                 color = COLORS["pickup_boost"]
             else:
@@ -1910,8 +2071,8 @@ def main():
         ui_pickups = [
             ("shield", COLORS["god_shield"] if god_mode else COLORS["pickup_shield"], shield_stock, shield_time, "1"),
             ("boost", COLORS["pickup_boost"], boost_stock, boost_time, "2"),
-            ("rapid", COLORS["pickup_rapid"], rapid_stock, rapid_time, "3"),
             ("spread", COLORS["pickup_spread"], spread_stock, spread_time, "4"),
+            ("mine", COLORS["pickup_mine"], mine_stock, 0.0, "5"),
         ]
         start_x = WIDTH / 2 - UI_PICKUP_SPACING * ((len(ui_pickups) - 1) / 2)
         for index, (kind, color, count, timer, key_label) in enumerate(ui_pickups):
@@ -1929,11 +2090,12 @@ def main():
                 count_surface,
                 (center.x + pickup_radius + 8, center.y - count_surface.get_height() / 2),
             )
-            key_surface = debug_font.render(key_label, True, COLORS["ui"])
-            screen.blit(
-                key_surface,
-                (center.x - key_surface.get_width() / 2, center.y - pickup_radius - 18),
-            )
+            if show_gamepad_debug:
+                key_surface = debug_font.render(key_label, True, COLORS["ui"])
+                screen.blit(
+                    key_surface,
+                    (center.x - key_surface.get_width() / 2, center.y - pickup_radius - 18),
+                )
             if timer > 0:
                 timer_text = f"{timer:.1f}s"
                 timer_surface = debug_font.render(timer_text, True, COLORS["ui"])
@@ -1988,10 +2150,9 @@ def main():
                 f"Seed: {seed}",
                 f"Shield: {shield_time:.1f}s" if shield_time > 0 else "Shield: -",
                 f"Shield Stock: {shield_stock}",
-                f"Rapid: {rapid_time:.1f}s" if rapid_time > 0 else "Rapid: -",
-                f"Rapid Stock: {rapid_stock}",
                 f"Spread: {spread_time:.1f}s" if spread_time > 0 else "Spread: -",
                 f"Spread Stock: {spread_stock}",
+                f"Mine Stock: {mine_stock}",
                 f"Boost: {boost_time:.1f}s" if boost_time > 0 else "Boost: -",
                 f"Boost Stock: {boost_stock}",
             ]
@@ -2001,9 +2162,10 @@ def main():
                 text = font.render(line, True, COLORS["ui"])
                 screen.blit(text, (10, 10 + (i + 1) * 20))
 
-        help_text = "Arrows/WASD move  Q/E strafe  X stop  L-stick aim  R1 thrust  L1 brake  Space shoot  1 shield  2 boost  3 rapid  4 spread  M map  F5 save  F6 load  F2 god shield  N new seed"
-        text = font.render(help_text, True, COLORS["ui"])
-        screen.blit(text, (10, HEIGHT - 28))
+        if show_gamepad_debug:
+            help_text = "Arrows/WASD move  Q/E strafe  LShift stop  L-stick aim  R1 thrust  L1 brake  Space shoot  1 shield  2 boost  4 spread  5 mine  M map  F5 save  F6 load  F2 god shield  N new seed"
+            text = font.render(help_text, True, COLORS["ui"])
+            screen.blit(text, (10, HEIGHT - 28))
 
         if game_over:
             if last_death_cause:

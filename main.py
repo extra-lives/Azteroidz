@@ -81,6 +81,7 @@ SAVE_PATH = "save.json"
 SHOOT_SOUND_PATH = os.path.join(BASE_DIR, "assets", "audio", "shoot-default.wav")
 EXPLODE_SOUND_PATH = os.path.join(BASE_DIR, "assets", "audio", "explode-default.wav")
 ASTEROID_EXPLODE_SOUND_PATH = os.path.join(BASE_DIR, "assets", "audio", "explode-asteroid.wav")
+SHIELD_SOUND_PATH = os.path.join(BASE_DIR, "assets", "audio", "shield-default.wav")
 
 SHIP_RADIUS = 12
 SHIP_THRUST = 260
@@ -158,6 +159,8 @@ SPREAD_ANGLE = 12
 MINE_DROP_COOLDOWN = 0.5
 MINE_RADIUS = 32
 MINE_BLAST_RADIUS = MINE_RADIUS * 3
+SOUND_NEAR_RADIUS = 600
+SOUND_FAR_RADIUS = 2400
 STAR_COUNT = 500
 FREIGHTER_COUNT = 10
 FREIGHTER_SPEED = (70, 110)
@@ -914,6 +917,7 @@ def main():
     explode_channel = None
     asteroid_explode_sound = None
     asteroid_explode_channel = None
+    shield_sound = None
     if pygame.mixer.get_init() is None:
         try:
             pygame.mixer.init()
@@ -935,6 +939,12 @@ def main():
         except pygame.error:
             explode_sound = None
             explode_channel = None
+    if pygame.mixer.get_init() and os.path.exists(SHIELD_SOUND_PATH):
+        try:
+            shield_sound = pygame.mixer.Sound(SHIELD_SOUND_PATH)
+            shield_sound.set_volume(0.8)
+        except pygame.error:
+            shield_sound = None
     if pygame.mixer.get_init() and os.path.exists(ASTEROID_EXPLODE_SOUND_PATH):
         try:
             asteroid_explode_sound = pygame.mixer.Sound(ASTEROID_EXPLODE_SOUND_PATH)
@@ -944,15 +954,35 @@ def main():
             asteroid_explode_sound = None
             asteroid_explode_channel = None
 
-    def play_explode_sound():
+    def attenuate_volume(world_pos, base_volume=1.0):
+        if world_pos is None:
+            return base_volume
+        dist = (world_pos - ship_pos).length()
+        if dist <= SOUND_NEAR_RADIUS:
+            return base_volume
+        if dist >= SOUND_FAR_RADIUS:
+            return 0.0
+        t = (SOUND_FAR_RADIUS - dist) / (SOUND_FAR_RADIUS - SOUND_NEAR_RADIUS)
+        return base_volume * t
+
+    def play_explode_sound(world_pos=None):
         if explode_sound:
+            volume = attenuate_volume(world_pos, 1.0)
+            if volume <= 0.0:
+                return
             if explode_channel:
+                explode_channel.set_volume(volume)
                 explode_channel.play(explode_sound)
             else:
-                explode_sound.play()
+                channel = explode_sound.play()
+                if channel:
+                    channel.set_volume(volume)
 
     def play_asteroid_explode_sound():
         return
+    def play_shield_sound():
+        if shield_sound:
+            shield_sound.play()
     joystick = None
     joy_name = "none"
     joy_axes = 0
@@ -1025,7 +1055,7 @@ def main():
                 if event.key == pygame.K_F1:
                     show_gamepad_debug = not show_gamepad_debug
                 elif event.key == pygame.K_F3:
-                    play_explode_sound()
+                    play_explode_sound(ship_pos)
                 elif event.key == pygame.K_m:
                     show_map = not show_map
                 elif event.key == pygame.K_F2:
@@ -1041,6 +1071,7 @@ def main():
                         shield_stock -= 1
                         shield_time = 8.0
                         shield_size_mult = 1.0
+                        play_shield_sound()
                 elif event.key == pygame.K_3 and not game_over:
                     if rapid_stock > 0 and rapid_time <= 0:
                         rapid_stock -= 1
@@ -1066,6 +1097,7 @@ def main():
                         shield_stock -= 1
                         shield_time = 8.0
                         shield_size_mult = 1.0
+                        play_shield_sound()
                 elif event.button == BTN_T and not game_over:
                     if boost_stock > 0 and boost_time <= 0:
                         boost_stock -= 1
@@ -1525,7 +1557,7 @@ def main():
                 for asteroid in asteroids:
                     hit_radius = asteroid.radius + SHIP_RADIUS
                     if moving_circle_hit(ship_pos, ship_pos, asteroid.pos, asteroid.pos, hit_radius):
-                        play_explode_sound()
+                        play_explode_sound(ship_pos)
                         lives -= 1
                         last_death_cause = "asteroid"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
@@ -1542,7 +1574,7 @@ def main():
                     for landmark in landmarks:
                         hit_radius = landmark.radius + SHIP_RADIUS
                         if moving_circle_hit(ship_pos, ship_pos, landmark.pos, landmark.pos, hit_radius):
-                            play_explode_sound()
+                            play_explode_sound(ship_pos)
                             lives -= 1
                             if landmark.kind == "moon":
                                 last_death_cause = "moon"
@@ -1583,7 +1615,7 @@ def main():
                     enemy_bullets.remove(bullet)
                     enemy_bullet_pool.append(bullet)
                     if shield_time <= 0:
-                        play_explode_sound()
+                        play_explode_sound(ship_pos)
                         lives -= 1
                         last_death_cause = "enemy bullet"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
@@ -1625,7 +1657,7 @@ def main():
                 hit_radius = enemy_radius + SHIP_RADIUS
                 if moving_circle_hit(enemy_prev, enemy.pos, ship_prev, ship_pos, hit_radius):
                     if shield_time <= 0:
-                        play_explode_sound()
+                        play_explode_sound(ship_pos)
                         lives -= 1
                         last_death_cause = "enemy ship"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
@@ -1644,7 +1676,7 @@ def main():
                 hit_radius = asteroid.radius + SHIP_RADIUS
                 if moving_circle_hit(ship_prev, ship_pos, asteroid_prev, asteroid.pos, hit_radius):
                     if shield_time <= 0:
-                        play_explode_sound()
+                        play_explode_sound(ship_pos)
                         lives -= 1
                         last_death_cause = "asteroid"
                         ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
@@ -1685,7 +1717,7 @@ def main():
                         )
                     else:
                         enemies.remove(hit_enemy)
-                        play_explode_sound()
+                        play_explode_sound(hit_enemy.pos)
                         score += 80 + (ELITE_ENEMY_SCORE_BONUS if hit_enemy.elite else 0)
                         shard_color = COLORS["elite_enemy"] if hit_enemy.elite else COLORS["enemy"]
                         spawn_enemy_shards(enemy_shards, enemy_shard_pool, hit_enemy.pos, hit_enemy.angle, shard_color)
@@ -1785,7 +1817,7 @@ def main():
                 for enemy in to_kill:
                     if enemy in enemies:
                         enemies.remove(enemy)
-                        play_explode_sound()
+                        play_explode_sound(enemy.pos)
                         score += 80 + (ELITE_ENEMY_SCORE_BONUS if enemy.elite else 0)
                         shard_color = COLORS["elite_enemy"] if enemy.elite else COLORS["enemy"]
                         spawn_enemy_shards(enemy_shards, enemy_shard_pool, enemy.pos, enemy.angle, shard_color)
@@ -1808,7 +1840,7 @@ def main():
                     hit_radius = asteroid.radius + enemy_radius
                     if moving_circle_hit(enemy_prev, enemy.pos, asteroid_prev, asteroid.pos, hit_radius):
                         enemies.remove(enemy)
-                        play_explode_sound()
+                        play_explode_sound(enemy.pos)
                         score += 100
                         break
 
@@ -1816,7 +1848,7 @@ def main():
                 hit_radius = landmark.radius + SHIP_RADIUS
                 if moving_circle_hit(ship_prev, ship_pos, landmark.pos, landmark.pos, hit_radius):
                     if shield_time <= 0:
-                        play_explode_sound()
+                        play_explode_sound(ship_pos)
                         lives -= 1
                         if landmark.kind == "moon":
                             last_death_cause = "moon"

@@ -1180,6 +1180,7 @@ def main():
     show_objectives = False
     discovered_planets = set()
     god_mode = False
+    escorts_alerted = False
 
     running = True
     while running:
@@ -1683,13 +1684,18 @@ def main():
         formation_active = False
         escorts_pursuing = False
         if boss and escorts_alive:
+            within_pursue_radius = False
             for escort in boss_escorts:
-                if (
-                    player_attack_timer > 0.0
-                    and (ship_pos - escort.pos).length_squared() <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS
-                ):
-                    escorts_pursuing = True
+                if (ship_pos - escort.pos).length_squared() <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS:
+                    within_pursue_radius = True
                     break
+            if player_attack_timer > 0.0 and within_pursue_radius:
+                escorts_alerted = True
+            elif escorts_alerted and within_pursue_radius:
+                escorts_alerted = True
+            else:
+                escorts_alerted = False
+            escorts_pursuing = escorts_alerted
         if boss:
             to_player = ship_pos - boss.pos
             formation_active = escorts_alive and not escorts_pursuing

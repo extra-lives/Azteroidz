@@ -171,6 +171,7 @@ SPREAD_ANGLE = 12
 MINE_DROP_COOLDOWN = 0.5
 MINE_RADIUS = 32
 MINE_BLAST_RADIUS = MINE_RADIUS * 3
+MINE_TTL = 60.0
 SOUND_NEAR_RADIUS = 600
 SOUND_FAR_RADIUS = 2400
 STAR_COUNT = 500
@@ -1032,6 +1033,9 @@ def main():
     font = pygame.font.SysFont("Consolas", 18)
     debug_font = pygame.font.SysFont("Consolas", 16)
     popup_font = pygame.font.SysFont("Consolas", 16, bold=True)
+    game_over_font_big = pygame.font.SysFont("Consolas", 64, bold=True)
+    game_over_font_med = pygame.font.SysFont("Consolas", 32)
+    game_over_font_small = pygame.font.SysFont("Consolas", 20)
     shoot_sound = None
     explode_sound = None
     explode_channel = None
@@ -1193,18 +1197,18 @@ def main():
                         shield_size_mult = 1.0
                         play_shield_sound()
                 elif event.key == pygame.K_3 and not game_over:
-                    if rapid_stock > 0 and rapid_time <= 0:
-                        rapid_stock -= 1
-                        rapid_time = 7.0
-                elif event.key == pygame.K_4 and not game_over:
                     if spread_stock > 0 and spread_time <= 0:
                         spread_stock -= 1
                         spread_time = SPREAD_TIME
-                elif event.key == pygame.K_5 and not game_over:
+                elif event.key == pygame.K_4 and not game_over:
                     if mine_stock > 0 and mine_cooldown <= 0:
-                        mines.append({"pos": pygame.Vector2(ship_pos)})
+                        mines.append({"pos": pygame.Vector2(ship_pos), "ttl": MINE_TTL})
                         mine_stock -= 1
                         mine_cooldown = MINE_DROP_COOLDOWN
+                elif event.key == pygame.K_5 and not game_over:
+                    if rapid_stock > 0 and rapid_time <= 0:
+                        rapid_stock -= 1
+                        rapid_time = 7.0
                 elif event.key == pygame.K_2 and not game_over:
                     if boost_stock > 0 and boost_time <= 0:
                         boost_stock -= 1
@@ -1228,7 +1232,7 @@ def main():
                         spread_time = SPREAD_TIME
                 elif event.button == BTN_L3 and not game_over:
                     if mine_stock > 0 and mine_cooldown <= 0:
-                        mines.append({"pos": pygame.Vector2(ship_pos)})
+                        mines.append({"pos": pygame.Vector2(ship_pos), "ttl": MINE_TTL})
                         mine_stock -= 1
                         mine_cooldown = MINE_DROP_COOLDOWN
 
@@ -2051,6 +2055,10 @@ def main():
                     break
 
             for mine in mines[:]:
+                mine["ttl"] -= dt
+                if mine["ttl"] <= 0:
+                    mines.remove(mine)
+                    continue
                 trigger_enemy = None
                 for enemy in enemies:
                     enemy_radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)
@@ -2410,8 +2418,8 @@ def main():
         ui_pickups = [
             ("shield", COLORS["god_shield"] if god_mode else COLORS["pickup_shield"], shield_stock, shield_time, "1"),
             ("boost", COLORS["pickup_boost"], boost_stock, boost_time, "2"),
-            ("spread", COLORS["pickup_spread"], spread_stock, spread_time, "4"),
-            ("mine", COLORS["pickup_mine"], mine_stock, 0.0, "5"),
+            ("spread", COLORS["pickup_spread"], spread_stock, spread_time, "3"),
+            ("mine", COLORS["pickup_mine"], mine_stock, 0.0, "4"),
         ]
         start_x = WIDTH / 2 - UI_PICKUP_SPACING * ((len(ui_pickups) - 1) / 2)
         for index, (kind, color, count, timer, key_label) in enumerate(ui_pickups):
@@ -2502,17 +2510,31 @@ def main():
                 screen.blit(text, (10, 10 + (i + 1) * 20))
 
         if show_gamepad_debug:
-            help_text = "Arrows/WASD move  Q/E strafe  LShift stop  L-stick aim  R1 thrust  L1 brake  Space shoot  1 shield  2 boost  4 spread  5 mine  M map  F5 save  F6 load  F2 god shield  N new seed"
+            help_text = "Arrows/WASD move  Q/E strafe  LShift stop  L-stick aim  R1 thrust  L1 brake  Space shoot  1 shield  2 boost  3 spread  4 mine  M map  F5 save  F6 load  F2 god shield  N new seed"
             text = font.render(help_text, True, COLORS["ui"])
             screen.blit(text, (10, HEIGHT - 28))
 
         if game_over:
-            if last_death_cause:
-                msg_text = f"Game Over - {last_death_cause} - press N for new seed"
-            else:
-                msg_text = "Game Over - press N for new seed"
-            msg = font.render(msg_text, True, COLORS["warning"])
-            screen.blit(msg, (WIDTH / 2 - msg.get_width() / 2, HEIGHT / 2))
+            title = "Game Over"
+            reason = f"{(last_death_cause or 'Unknown').title()} Killed You"
+            prompt = "Press N key for New Map"
+            title_surface = game_over_font_big.render(title, True, COLORS["warning"])
+            reason_surface = game_over_font_med.render(reason, True, COLORS["warning"])
+            prompt_surface = game_over_font_small.render(prompt, True, COLORS["warning"])
+            total_h = title_surface.get_height() + reason_surface.get_height() + prompt_surface.get_height() + 18
+            start_y = HEIGHT / 2 - total_h / 2
+            screen.blit(title_surface, (WIDTH / 2 - title_surface.get_width() / 2, start_y))
+            screen.blit(
+                reason_surface,
+                (WIDTH / 2 - reason_surface.get_width() / 2, start_y + title_surface.get_height() + 8),
+            )
+            screen.blit(
+                prompt_surface,
+                (
+                    WIDTH / 2 - prompt_surface.get_width() / 2,
+                    start_y + title_surface.get_height() + reason_surface.get_height() + 16,
+                ),
+            )
 
         pygame.display.flip()
 

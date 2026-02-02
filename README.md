@@ -52,7 +52,7 @@ Keyboard:
 - New seed: N
 - Save: F5
 - Load: F6
-- Powerups: 1 Shield, 2 Boost, 4 Spread, 5 Mine
+- Powerups: 1 Shield, 2 Boost, 3 Spread, 4 Mine
 - Toggle debug HUD: F1
 
 Gamepad (DualShock-style via pygame):

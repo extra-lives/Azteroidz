@@ -11,6 +11,7 @@ Built alongside OpenAI Codex as an iterative, collaborative prototype.
 - Asteroids that fragment into smaller chunks
 - Enemies (including elite variants)
 - Pickups: shield, boost, spread, mines, and shootable boost canisters
+- Objectives screen with per-seed checklist tracking
 - Save/load support and seeded world resets
 - Gamepad support (DualShock-style mappings via pygame)
 
@@ -67,4 +68,5 @@ Gamepad (DualShock-style via pygame):
 - The universe wraps only for the player ship (currently blocked by the red bounds debug overlay).
 - Collisions with asteroids/planets/moons are fatal.
 - Pickups persist until collected.
+- Mines expire after 60 seconds if not triggered.
 - Explosion sounds are distance-attenuated so off-screen events are quieter.

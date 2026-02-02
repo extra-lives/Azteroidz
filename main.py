@@ -4,7 +4,7 @@ import os
 import random
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import pygame
@@ -147,6 +147,18 @@ ENEMY_OFFSCREEN_MARGIN = 240
 ENEMY_DESPAWN_RADIUS = 5200
 ENEMY_SPAWN_INTERVAL = 3.2
 
+BOSS_SCALE = 6.0
+BOSS_RADIUS = int(SHIP_RADIUS * BOSS_SCALE)
+BOSS_PATROL_SPEED = 120
+BOSS_TURN_SPEED = 80
+BOSS_FIRE_COOLDOWN = 1.6
+BOSS_BULLET_SPEED = 380
+BOSS_MAX_HP = 1000
+BOSS_HIT_DAMAGE = 10
+BOSS_FORMATION_BREAK_RADIUS = 750
+BOSS_PATROL_NODE_RADIUS = 220
+BOSS_SCORE_BONUS = 900
+
 PICKUP_TTL = 15.0
 PICKUP_GRID_SPACING = 0.7
 PICKUP_RADIUS = 24
@@ -219,6 +231,8 @@ COLORS = {
     "enemy_shield": (255, 170, 80),
     "elite_enemy_shield": (220, 160, 255),
     "elite_enemy": (200, 80, 255),
+    "boss": (245, 200, 90),
+    "boss_shield": (220, 60, 60),
     "freighter": (150, 110, 80),
     "freighter_shield": (120, 160, 200),
     "god_shield": (255, 215, 80),
@@ -257,6 +271,19 @@ class Enemy:
     wander_angle: float
     pursuing: bool = False
     elite: bool = False
+    escort: bool = False
+    escort_offset: pygame.Vector2 = field(default_factory=pygame.Vector2)
+
+
+@dataclass(slots=True)
+class Boss:
+    pos: pygame.Vector2
+    vel: pygame.Vector2
+    angle: float
+    hp: int
+    fire_timer: float
+    patrol_index: int
+    patrol_points: list
 
 
 @dataclass(slots=True)
@@ -341,6 +368,13 @@ def spawn_damage_popup(popups, pool, font, text, world_pos, color):
             "surface": surface,
         }
     popups.append(popup)
+
+
+def remove_enemy(enemies, enemy, boss_escorts):
+    if enemy in enemies:
+        enemies.remove(enemy)
+    if boss_escorts is not None and enemy in boss_escorts:
+        boss_escorts.remove(enemy)
 
 
 def make_beacon_id(rng):
@@ -543,6 +577,72 @@ def spawn_enemy_near(rng, center, landmarks, elite=False):
     return enemy
 
 
+def boss_patrol_points(margin):
+    return [
+        pygame.Vector2(margin, margin),
+        pygame.Vector2(WORLD_WIDTH * 0.5, margin),
+        pygame.Vector2(WORLD_WIDTH - margin, margin),
+        pygame.Vector2(WORLD_WIDTH - margin, WORLD_HEIGHT * 0.5),
+        pygame.Vector2(WORLD_WIDTH - margin, WORLD_HEIGHT - margin),
+        pygame.Vector2(WORLD_WIDTH * 0.5, WORLD_HEIGHT - margin),
+        pygame.Vector2(margin, WORLD_HEIGHT - margin),
+        pygame.Vector2(margin, WORLD_HEIGHT * 0.5),
+    ]
+
+
+def spawn_boss_with_escorts(seed):
+    rng = random.Random(seed ^ 0xB055B055)
+    margin = max(BOSS_RADIUS * 2.0, 900)
+    patrol_points = boss_patrol_points(margin)
+    start_index = rng.randrange(len(patrol_points))
+    start_pos = pygame.Vector2(patrol_points[start_index])
+    next_index = (start_index + 1) % len(patrol_points)
+    to_next = patrol_points[next_index] - start_pos
+    angle = vector_to_angle(to_next) if to_next.length_squared() > 0 else 0.0
+    boss = Boss(
+        pos=start_pos,
+        vel=pygame.Vector2(0, 0),
+        angle=angle,
+        hp=BOSS_MAX_HP,
+        fire_timer=rng.uniform(0, BOSS_FIRE_COOLDOWN),
+        patrol_index=next_index,
+        patrol_points=patrol_points,
+    )
+
+    elite_offsets = [
+        pygame.Vector2(BOSS_RADIUS * 1.8, -BOSS_RADIUS * 0.8),
+        pygame.Vector2(BOSS_RADIUS * 1.8, BOSS_RADIUS * 0.8),
+        pygame.Vector2(-BOSS_RADIUS * 1.1, -BOSS_RADIUS * 1.4),
+        pygame.Vector2(-BOSS_RADIUS * 1.1, BOSS_RADIUS * 1.4),
+    ]
+    regular_offsets = [
+        pygame.Vector2(BOSS_RADIUS * 2.6, 0.0),
+        pygame.Vector2(BOSS_RADIUS * 0.4, -BOSS_RADIUS * 2.2),
+        pygame.Vector2(BOSS_RADIUS * 0.4, BOSS_RADIUS * 2.2),
+        pygame.Vector2(-BOSS_RADIUS * 2.0, 0.0),
+        pygame.Vector2(-BOSS_RADIUS * 0.6, -BOSS_RADIUS * 2.4),
+        pygame.Vector2(-BOSS_RADIUS * 0.6, BOSS_RADIUS * 2.4),
+    ]
+
+    escorts = []
+    for offset in elite_offsets:
+        enemy = spawn_enemy(rng, elite=True)
+        enemy.escort = True
+        enemy.escort_offset = pygame.Vector2(offset)
+        enemy.pos = boss.pos + offset.rotate(boss.angle)
+        enemy.angle = boss.angle
+        escorts.append(enemy)
+    for offset in regular_offsets:
+        enemy = spawn_enemy(rng, elite=False)
+        enemy.escort = True
+        enemy.escort_offset = pygame.Vector2(offset)
+        enemy.pos = boss.pos + offset.rotate(boss.angle)
+        enemy.angle = boss.angle
+        escorts.append(enemy)
+
+    return boss, escorts
+
+
 def segment_hits_circle(rel_prev, rel_curr, radius):
     radius_sq = radius * radius
     if rel_prev.length_squared() <= radius_sq or rel_curr.length_squared() <= radius_sq:
@@ -728,9 +828,11 @@ def new_world(seed):
     center = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
     landmarks = generate_landmarks(seed)
     enemies = generate_enemies(seed, center, landmarks)
+    boss, boss_escorts = spawn_boss_with_escorts(seed)
+    enemies.extend(boss_escorts)
     stars = generate_starfield(seed)
     freighters = generate_freighters(seed, landmarks)
-    return asteroids, pickups, enemies, landmarks, stars, freighters
+    return asteroids, pickups, enemies, landmarks, stars, freighters, boss, boss_escorts
 
 
 def load_state():
@@ -817,6 +919,24 @@ def draw_ship(surface, pos, angle, color, scale=1.0):
         (pos.x + right.x, pos.y + right.y),
     ]
     pygame.draw.lines(surface, color, True, points, 2)
+
+
+def draw_boss(surface, pos, angle, color, scale=1.0):
+    render_radius = SHIP_RADIUS * CAMERA_ZOOM * scale
+    front = render_radius * 1.4
+    rear = render_radius * 1.05
+    wing = render_radius * 0.85
+    peak_offset = render_radius * 0.28
+    peak_depth = render_radius * 0.22
+    points = [
+        (front, -peak_offset),
+        (front - peak_depth, 0),
+        (front, peak_offset),
+        (-rear, wing),
+        (-rear * 0.7, 0),
+        (-rear, -wing),
+    ]
+    draw_vector_shape(surface, pos, angle, points, color, 3)
 
 
 def draw_freighter(surface, pos, angle, color):
@@ -998,7 +1118,7 @@ def main():
         joy_hats = joystick.get_numhats()
 
     seed = seed_from_time()
-    asteroids, pickups, enemies, landmarks, stars, freighters = new_world(seed)
+    asteroids, pickups, enemies, landmarks, stars, freighters, boss, boss_escorts = new_world(seed)
 
     ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
     ship_vel = pygame.Vector2(0, 0)
@@ -1150,6 +1270,11 @@ def main():
                 map_x = map_rect.x + (freighter["pos"].x / WORLD_WIDTH) * map_rect.width
                 map_y = map_rect.y + (freighter["pos"].y / WORLD_HEIGHT) * map_rect.height
                 pygame.draw.circle(screen, COLORS["freighter"], (int(map_x), int(map_y)), 3, 0)
+            if boss:
+                map_x = map_rect.x + (boss.pos.x / WORLD_WIDTH) * map_rect.width
+                map_y = map_rect.y + (boss.pos.y / WORLD_HEIGHT) * map_rect.height
+                pygame.draw.circle(screen, COLORS["boss"], (int(map_x), int(map_y)), 6, 0)
+                pygame.draw.circle(screen, COLORS["boss_shield"], (int(map_x), int(map_y)), 9, 1)
             map_x = map_rect.x + (ship_pos.x / WORLD_WIDTH) * map_rect.width
             map_y = map_rect.y + (ship_pos.y / WORLD_HEIGHT) * map_rect.height
             pygame.draw.circle(screen, COLORS["pickup_shield"], (int(map_x), int(map_y)), 5, 0)
@@ -1160,7 +1285,7 @@ def main():
 
         if keys[pygame.K_n]:
             seed = seed_from_time()
-            asteroids, pickups, enemies, landmarks, stars, freighters = new_world(seed)
+            asteroids, pickups, enemies, landmarks, stars, freighters, boss, boss_escorts = new_world(seed)
             bullets = []
             enemy_bullets = []
             bullet_pool = []
@@ -1232,6 +1357,8 @@ def main():
                 mines = []
                 landmarks = generate_landmarks(seed)
                 enemies = generate_enemies(seed, pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2), landmarks)
+                boss, boss_escorts = spawn_boss_with_escorts(seed)
+                enemies.extend(boss_escorts)
                 stars = generate_starfield(seed)
                 freighters = generate_freighters(seed, landmarks)
                 player = data["player"]
@@ -1465,8 +1592,10 @@ def main():
                     enemies.append(spawn_enemy_near(rng, ship_pos, landmarks, elite=rng.random() < chance))
         despawn_sq = ENEMY_DESPAWN_RADIUS * ENEMY_DESPAWN_RADIUS
         for enemy in enemies[:]:
+            if enemy.escort:
+                continue
             if (enemy.pos - ship_pos).length_squared() > despawn_sq:
-                enemies.remove(enemy)
+                remove_enemy(enemies, enemy, boss_escorts)
 
         asteroid_spawn_timer -= dt
         if asteroid_spawn_timer <= 0:
@@ -1483,7 +1612,83 @@ def main():
                     size = 4 if rng.random() < 0.12 else 3
                     asteroids.append(spawn_asteroid_near(rng, size, ship_pos))
 
+        boss_escorts = [enemy for enemy in enemies if enemy.escort]
+        escorts_alive = len(boss_escorts) > 0
+        formation_active = False
+        escorts_pursuing = False
+        if boss and escorts_alive:
+            for escort in boss_escorts:
+                if (ship_pos - escort.pos).length_squared() <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS:
+                    escorts_pursuing = True
+                    break
+        if boss:
+            to_player = ship_pos - boss.pos
+            formation_active = (
+                escorts_alive
+                and not escorts_pursuing
+                and to_player.length_squared() > BOSS_FORMATION_BREAK_RADIUS * BOSS_FORMATION_BREAK_RADIUS
+            )
+            if escorts_alive and escorts_pursuing:
+                boss.vel = pygame.Vector2(0, 0)
+                if to_player.length_squared() > 0:
+                    boss.angle = turn_towards(boss.angle, vector_to_angle(to_player), BOSS_TURN_SPEED * dt)
+            elif escorts_alive:
+                target = boss.patrol_points[boss.patrol_index]
+                to_target = target - boss.pos
+                if to_target.length_squared() <= BOSS_PATROL_NODE_RADIUS * BOSS_PATROL_NODE_RADIUS:
+                    boss.patrol_index = (boss.patrol_index + 1) % len(boss.patrol_points)
+                    target = boss.patrol_points[boss.patrol_index]
+                    to_target = target - boss.pos
+                if to_target.length_squared() > 0:
+                    target_angle = vector_to_angle(to_target)
+                    boss.angle = turn_towards(boss.angle, target_angle, BOSS_TURN_SPEED * dt)
+                    boss.vel = angle_to_vector(boss.angle) * BOSS_PATROL_SPEED
+                else:
+                    boss.vel = pygame.Vector2(0, 0)
+                boss.pos += boss.vel * dt
+            else:
+                if to_player.length_squared() > 0:
+                    target_angle = vector_to_angle(to_player)
+                    boss.angle = turn_towards(boss.angle, target_angle, BOSS_TURN_SPEED * dt)
+                boss.vel = angle_to_vector(boss.angle) * (SHIP_MAX_SPEED * 0.5)
+                boss.pos += boss.vel * dt
+                boss.fire_timer = max(0.0, boss.fire_timer - dt)
+                if boss.fire_timer <= 0.0:
+                    bullet_vel = angle_to_vector(boss.angle) * BOSS_BULLET_SPEED + boss.vel * 0.2
+                    if enemy_bullet_pool:
+                        bullet = enemy_bullet_pool.pop()
+                        bullet["pos"].update(boss.pos)
+                        bullet["vel"].update(bullet_vel)
+                        bullet["ttl"] = ENEMY_BULLET_TTL
+                    else:
+                        bullet = {"pos": pygame.Vector2(boss.pos), "vel": bullet_vel, "ttl": ENEMY_BULLET_TTL}
+                    enemy_bullets.append(bullet)
+                    boss.fire_timer = BOSS_FIRE_COOLDOWN
+            boss.pos = clamp_position(boss.pos, BOSS_RADIUS)
+
         for enemy in enemies[:]:
+            if boss and formation_active and enemy.escort:
+                desired_pos = boss.pos + enemy.escort_offset.rotate(boss.angle)
+                to_desired = desired_pos - enemy.pos
+                dist = to_desired.length()
+                if dist > 1:
+                    return_speed = ENEMY_PURSUE_SPEED * 2.0
+                    max_step = return_speed * dt
+                    if dist <= max_step:
+                        enemy.pos = pygame.Vector2(desired_pos)
+                        enemy.vel = pygame.Vector2(0, 0)
+                        enemy.angle = boss.angle
+                    else:
+                        target_angle = vector_to_angle(to_desired)
+                        enemy.angle = turn_towards(enemy.angle, target_angle, ENEMY_TURN_SPEED * dt * 1.5)
+                        enemy.vel = angle_to_vector(enemy.angle) * return_speed
+                        enemy.pos = enemy.pos + enemy.vel * dt
+                else:
+                    enemy.pos = pygame.Vector2(desired_pos)
+                    enemy.vel = pygame.Vector2(0, 0)
+                    enemy.angle = boss.angle
+                enemy.pursuing = False
+                continue
             enemy_radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)
             to_player = ship_pos - enemy.pos
             dist_sq = to_player.length_squared()
@@ -1513,7 +1718,7 @@ def main():
                 or enemy.pos.y < -enemy_radius
                 or enemy.pos.y > WORLD_HEIGHT + enemy_radius
             ):
-                enemies.remove(enemy)
+                remove_enemy(enemies, enemy, boss_escorts)
                 continue
             fire_rate_mult = ELITE_ENEMY_FIRE_RATE_MULT if enemy.elite else 1.0
             bullet_speed_mult = ELITE_ENEMY_BULLET_SPEED_MULT if enemy.elite else 1.0
@@ -1671,6 +1876,24 @@ def main():
                             game_over = True
                     break
 
+            if boss:
+                boss_prev = prev_pos(boss.pos, boss.vel, dt)
+                hit_radius = BOSS_RADIUS + SHIP_RADIUS
+                if moving_circle_hit(boss_prev, boss.pos, ship_prev, ship_pos, hit_radius):
+                    if shield_time <= 0:
+                        play_explode_sound(ship_pos)
+                        lives -= 1
+                        last_death_cause = "boss ship"
+                        ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
+                        ship_vel = pygame.Vector2(0, 0)
+                        shield_time = 10.0
+                        shield_size_mult = 3.0
+                        rapid_time = 0.0
+                        spread_time = 0.0
+                        boost_time = 0.0
+                        if lives <= 0:
+                            game_over = True
+
             for asteroid in asteroids[:]:
                 asteroid_prev = prev_pos(asteroid.pos, asteroid.vel, dt)
                 hit_radius = asteroid.radius + SHIP_RADIUS
@@ -1691,6 +1914,33 @@ def main():
                     break
 
             for bullet in bullets[:]:
+                if boss:
+                    bullet_prev = prev_pos(bullet["pos"], bullet["vel"], dt)
+                    boss_prev = prev_pos(boss.pos, boss.vel, dt)
+                    radius = BOSS_RADIUS + BULLET_HIT_SLOP
+                    if moving_circle_hit(bullet_prev, bullet["pos"], boss_prev, boss.pos, radius):
+                        bullets.remove(bullet)
+                        bullet_pool.append(bullet)
+                        if not escorts_alive:
+                            boss.hp = max(0, boss.hp - BOSS_HIT_DAMAGE)
+                            score += BOSS_HIT_DAMAGE
+                            spawn_damage_popup(
+                                damage_popups,
+                                damage_popup_pool,
+                                popup_font,
+                                str(BOSS_HIT_DAMAGE),
+                                boss.pos,
+                                COLORS["boss"],
+                            )
+                            if boss.hp <= 0:
+                                play_explode_sound(boss.pos)
+                                score += BOSS_SCORE_BONUS
+                                for _ in range(6):
+                                    spawn_enemy_shards(
+                                        enemy_shards, enemy_shard_pool, boss.pos, boss.angle, COLORS["boss"]
+                                    )
+                                boss = None
+                        continue
                 hit_enemy = None
                 for enemy in enemies:
                     enemy_radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)
@@ -1706,7 +1956,10 @@ def main():
                     if hit_enemy.shield > 0:
                         hit_enemy.shield -= 1
                         score += 20
-                        hit_color = COLORS["elite_enemy"] if hit_enemy.elite else COLORS["enemy_shield"]
+                        if hit_enemy.escort:
+                            hit_color = COLORS["boss_shield"]
+                        else:
+                            hit_color = COLORS["elite_enemy"] if hit_enemy.elite else COLORS["enemy_shield"]
                         spawn_damage_popup(
                             damage_popups,
                             damage_popup_pool,
@@ -1716,7 +1969,7 @@ def main():
                             hit_color,
                         )
                     else:
-                        enemies.remove(hit_enemy)
+                        remove_enemy(enemies, hit_enemy, boss_escorts)
                         play_explode_sound(hit_enemy.pos)
                         score += 80 + (ELITE_ENEMY_SCORE_BONUS if hit_enemy.elite else 0)
                         shard_color = COLORS["elite_enemy"] if hit_enemy.elite else COLORS["enemy"]
@@ -1804,11 +2057,15 @@ def main():
                     if (enemy.pos - mine["pos"]).length() <= enemy_radius + MINE_RADIUS:
                         trigger_enemy = enemy
                         break
-                if not trigger_enemy:
+                trigger_boss = False
+                if not trigger_enemy and boss and not escorts_alive:
+                    if (boss.pos - mine["pos"]).length() <= BOSS_RADIUS + MINE_RADIUS:
+                        trigger_boss = True
+                if not trigger_enemy and not trigger_boss:
                     continue
 
                 mines.remove(mine)
-                to_kill = [trigger_enemy]
+                to_kill = [trigger_enemy] if trigger_enemy else []
                 for enemy in enemies:
                     if enemy is trigger_enemy:
                         continue
@@ -1816,7 +2073,7 @@ def main():
                         to_kill.append(enemy)
                 for enemy in to_kill:
                     if enemy in enemies:
-                        enemies.remove(enemy)
+                        remove_enemy(enemies, enemy, boss_escorts)
                         play_explode_sound(enemy.pos)
                         score += 80 + (ELITE_ENEMY_SCORE_BONUS if enemy.elite else 0)
                         shard_color = COLORS["elite_enemy"] if enemy.elite else COLORS["enemy"]
@@ -1829,6 +2086,26 @@ def main():
                             enemy.pos,
                             COLORS["elite_enemy"] if enemy.elite else COLORS["enemy"],
                         )
+                if boss and not escorts_alive and boss is not None:
+                    if (boss.pos - mine["pos"]).length() <= MINE_BLAST_RADIUS + BOSS_RADIUS:
+                        boss.hp = max(0, boss.hp - BOSS_HIT_DAMAGE)
+                        score += BOSS_HIT_DAMAGE
+                        spawn_damage_popup(
+                            damage_popups,
+                            damage_popup_pool,
+                            popup_font,
+                            str(BOSS_HIT_DAMAGE),
+                            boss.pos,
+                            COLORS["boss"],
+                        )
+                        if boss.hp <= 0:
+                            play_explode_sound(boss.pos)
+                            score += BOSS_SCORE_BONUS
+                            for _ in range(6):
+                                spawn_enemy_shards(
+                                    enemy_shards, enemy_shard_pool, boss.pos, boss.angle, COLORS["boss"]
+                                )
+                            boss = None
 
             for enemy in enemies[:]:
                 if enemy.shield > 0:
@@ -1839,7 +2116,7 @@ def main():
                     asteroid_prev = prev_pos(asteroid.pos, asteroid.vel, dt)
                     hit_radius = asteroid.radius + enemy_radius
                     if moving_circle_hit(enemy_prev, enemy.pos, asteroid_prev, asteroid.pos, hit_radius):
-                        enemies.remove(enemy)
+                        remove_enemy(enemies, enemy, boss_escorts)
                         play_explode_sound(enemy.pos)
                         score += 100
                         break
@@ -1982,17 +2259,42 @@ def main():
                 COLORS["mine_core"],
             )
 
+        if boss:
+            screen_pos = world_to_screen(boss.pos, ship_pos)
+            if escorts_alive:
+                shield_radius = (BOSS_RADIUS + 16) * CAMERA_ZOOM
+                pygame.draw.circle(
+                    screen,
+                    COLORS["boss_shield"],
+                    (int(screen_pos.x), int(screen_pos.y)),
+                    max(1, int(shield_radius)),
+                    2,
+                )
+            if boss.vel.length_squared() > 0:
+                draw_thruster(
+                    screen,
+                    screen_pos,
+                    boss.angle,
+                    COLORS["pickup_rapid"],
+                    2.2,
+                    3.0,
+                )
+            draw_boss(screen, screen_pos, boss.angle, COLORS["boss"], BOSS_SCALE)
+
         for enemy in enemies:
             screen_pos = world_to_screen(enemy.pos, ship_pos)
             if enemy.shield > 0:
                 shield_mult = ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0
-                shield_radius = (ENEMY_RADIUS + 8) * CAMERA_ZOOM * shield_mult
+                if not enemy.elite and not enemy.escort:
+                    shield_radius = (SHIP_RADIUS + 10) * CAMERA_ZOOM
+                else:
+                    shield_radius = (ENEMY_RADIUS + 8) * CAMERA_ZOOM * shield_mult
                 pygame.draw.circle(
                     screen,
-                    COLORS["elite_enemy_shield"] if enemy.elite else COLORS["enemy_shield"],
+                    COLORS["boss_shield"] if enemy.escort else (COLORS["elite_enemy_shield"] if enemy.elite else COLORS["enemy_shield"]),
                     (int(screen_pos.x), int(screen_pos.y)),
                     max(1, int(shield_radius)),
-                    2 if enemy.elite else 1,
+                    2 if enemy.elite or enemy.escort else 1,
                 )
             if enemy.pursuing:
                 back_mult = 2.0 * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)

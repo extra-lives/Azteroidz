@@ -49,6 +49,7 @@ Keyboard:
 - Shoot: Space
 - Brake/stop: LShift
 - Map: M
+- Objectives: O
 - New seed: N
 - Save: F5
 - Load: F6

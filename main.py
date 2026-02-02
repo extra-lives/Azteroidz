@@ -156,6 +156,7 @@ BOSS_BULLET_SPEED = 380
 BOSS_MAX_HP = 1000
 BOSS_HIT_DAMAGE = 10
 BOSS_FORMATION_BREAK_RADIUS = 750
+BOSS_ESCORT_LEASH_RADIUS = BOSS_FORMATION_BREAK_RADIUS
 BOSS_PATROL_NODE_RADIUS = 220
 BOSS_SCORE_BONUS = 900
 
@@ -172,6 +173,10 @@ MINE_DROP_COOLDOWN = 0.5
 MINE_RADIUS = 32
 MINE_BLAST_RADIUS = MINE_RADIUS * 3
 MINE_TTL = 60.0
+PLAYER_ATTACK_MEMORY = 1.2
+OBJECTIVE_ENEMIES_10 = 10
+OBJECTIVE_ENEMIES_50 = 50
+OBJECTIVE_BOOST_50 = 50
 SOUND_NEAR_RADIUS = 600
 SOUND_FAR_RADIUS = 2400
 STAR_COUNT = 500
@@ -901,6 +906,10 @@ def deserialize_pickup(data):
     return Pickup(kind=kind, pos=deserialize_vec(data["pos"]), ttl=data["ttl"], shell_hp=shell_hp)
 
 
+def count_planets(landmarks):
+    return sum(1 for landmark in landmarks if landmark.kind == "planet")
+
+
 def draw_vector_shape(surface, pos, angle, points, color, width=2):
     rotated = []
     for x, y in points:
@@ -1123,6 +1132,7 @@ def main():
 
     seed = seed_from_time()
     asteroids, pickups, enemies, landmarks, stars, freighters, boss, boss_escorts = new_world(seed)
+    planet_total = count_planets(landmarks)
 
     ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
     ship_vel = pygame.Vector2(0, 0)
@@ -1139,6 +1149,10 @@ def main():
     enemy_shard_pool = []
     mines = []
     fire_timer = 0.0
+    player_attack_timer = 0.0
+    enemies_destroyed = 0
+    boosts_used = 0
+    boss_defeated = False
     score = 0
     lives = 3
     game_over = False
@@ -1163,6 +1177,7 @@ def main():
     stop_thruster_held = False
     stop_thruster_side = "both"
     show_map = False
+    show_objectives = False
     discovered_planets = set()
     god_mode = False
 
@@ -1182,6 +1197,12 @@ def main():
                     play_explode_sound(ship_pos)
                 elif event.key == pygame.K_m:
                     show_map = not show_map
+                    if show_map:
+                        show_objectives = False
+                elif event.key == pygame.K_o:
+                    show_objectives = not show_objectives
+                    if show_objectives:
+                        show_map = False
                 elif event.key == pygame.K_F2:
                     god_mode = not god_mode
                     if god_mode:
@@ -1213,6 +1234,7 @@ def main():
                     if boost_stock > 0 and boost_time <= 0:
                         boost_stock -= 1
                         boost_time = BOOST_TIME
+                        boosts_used += 1
             elif event.type == pygame.JOYBUTTONDOWN:
                 if event.button == BTN_MAP:
                     show_map = not show_map
@@ -1226,6 +1248,7 @@ def main():
                     if boost_stock > 0 and boost_time <= 0:
                         boost_stock -= 1
                         boost_time = BOOST_TIME
+                        boosts_used += 1
                 elif event.button == BTN_O and not game_over:
                     if spread_stock > 0 and spread_time <= 0:
                         spread_stock -= 1
@@ -1286,6 +1309,29 @@ def main():
             screen.blit(title, (WIDTH / 2 - title.get_width() / 2, 24))
             pygame.display.flip()
             continue
+        if show_objectives:
+            screen.fill(COLORS["bg"])
+            title = font.render("Objectives - press O to close", True, COLORS["ui"])
+            screen.blit(title, (WIDTH / 2 - title.get_width() / 2, 24))
+            planet_goal = planet_total if planet_total > 0 else 10
+            objectives = [
+                ("Defeat boss", boss_defeated),
+                ("First kill", enemies_destroyed >= 1),
+                (f"Discover all {planet_goal} planets", len(discovered_planets) >= planet_goal),
+                (f"Destroy {OBJECTIVE_ENEMIES_10} enemies", enemies_destroyed >= OBJECTIVE_ENEMIES_10),
+                (f"Destroy {OBJECTIVE_ENEMIES_50} enemies", enemies_destroyed >= OBJECTIVE_ENEMIES_50),
+                (f"Boost {OBJECTIVE_BOOST_50} times", boosts_used >= OBJECTIVE_BOOST_50),
+            ]
+            start_y = 120
+            line_gap = 40
+            for index, (label, completed) in enumerate(objectives):
+                prefix = "[x]" if completed else "[ ]"
+                line = f"{prefix} {label}"
+                color = COLORS["ui"] if completed else scale_color(COLORS["ui"], 0.75)
+                line_surface = font.render(line, True, color)
+                screen.blit(line_surface, (120, start_y + index * line_gap))
+            pygame.display.flip()
+            continue
 
         if keys[pygame.K_n]:
             seed = seed_from_time()
@@ -1303,6 +1349,7 @@ def main():
             ship_pos = pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2)
             ship_vel = pygame.Vector2(0, 0)
             ship_angle = -90
+            planet_total = count_planets(landmarks)
             score = 0
             lives = 3
             shield_time = 10.0
@@ -1319,6 +1366,9 @@ def main():
             game_over = False
             last_death_cause = None
             discovered_planets = set()
+            enemies_destroyed = 0
+            boosts_used = 0
+            boss_defeated = False
 
         if keys[pygame.K_F5]:
             state = {
@@ -1342,6 +1392,11 @@ def main():
                 "asteroids": [serialize_asteroid(a) for a in asteroids],
                 "pickups": [serialize_pickup(p) for p in pickups],
                 "discovered_planets": sorted(discovered_planets),
+                "objectives": {
+                    "boss_defeated": boss_defeated,
+                    "enemies_destroyed": enemies_destroyed,
+                    "boosts_used": boosts_used,
+                },
             }
             save_state(state)
 
@@ -1360,6 +1415,7 @@ def main():
                 enemy_shard_pool = []
                 mines = []
                 landmarks = generate_landmarks(seed)
+                planet_total = count_planets(landmarks)
                 enemies = generate_enemies(seed, pygame.Vector2(WORLD_WIDTH / 2, WORLD_HEIGHT / 2), landmarks)
                 boss, boss_escorts = spawn_boss_with_escorts(seed)
                 enemies.extend(boss_escorts)
@@ -1385,6 +1441,10 @@ def main():
                 game_over = False
                 last_death_cause = None
                 discovered_planets = set(data.get("discovered_planets", []))
+                objectives = data.get("objectives", {})
+                boss_defeated = objectives.get("boss_defeated", False)
+                enemies_destroyed = objectives.get("enemies_destroyed", 0)
+                boosts_used = objectives.get("boosts_used", 0)
 
         strafe_left = False
         strafe_right = False
@@ -1498,6 +1558,7 @@ def main():
             ship_prev = pygame.Vector2(ship_pos)
 
             fire_timer = max(0.0, fire_timer - dt)
+            player_attack_timer = max(0.0, player_attack_timer - dt)
             rapid_multiplier = 0.55 if rapid_time > 0 else 1.0
             cooldown = FIRE_COOLDOWN * rapid_multiplier
             if (keys[pygame.K_SPACE] or fire_button) and fire_timer <= 0.0:
@@ -1516,6 +1577,7 @@ def main():
                     bullets.append(bullet)
                 if shoot_sound:
                     shoot_sound.play()
+                player_attack_timer = PLAYER_ATTACK_MEMORY
                 fire_timer = cooldown
 
         if god_mode:
@@ -1622,16 +1684,15 @@ def main():
         escorts_pursuing = False
         if boss and escorts_alive:
             for escort in boss_escorts:
-                if (ship_pos - escort.pos).length_squared() <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS:
+                if (
+                    player_attack_timer > 0.0
+                    and (ship_pos - escort.pos).length_squared() <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS
+                ):
                     escorts_pursuing = True
                     break
         if boss:
             to_player = ship_pos - boss.pos
-            formation_active = (
-                escorts_alive
-                and not escorts_pursuing
-                and to_player.length_squared() > BOSS_FORMATION_BREAK_RADIUS * BOSS_FORMATION_BREAK_RADIUS
-            )
+            formation_active = escorts_alive and not escorts_pursuing
             if escorts_alive and escorts_pursuing:
                 boss.vel = pygame.Vector2(0, 0)
                 if to_player.length_squared() > 0:
@@ -1671,6 +1732,8 @@ def main():
             boss.pos = clamp_position(boss.pos, BOSS_RADIUS)
 
         for enemy in enemies[:]:
+            escort_override = False
+            dist_sq = 0.0
             if boss and formation_active and enemy.escort:
                 desired_pos = boss.pos + enemy.escort_offset.rotate(boss.angle)
                 to_desired = desired_pos - enemy.pos
@@ -1693,42 +1756,66 @@ def main():
                     enemy.angle = boss.angle
                 enemy.pursuing = False
                 continue
-            enemy_radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)
-            to_player = ship_pos - enemy.pos
-            dist_sq = to_player.length_squared()
-            pursuing = dist_sq <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS
-            enemy.pursuing = pursuing
-            speed_mult = ELITE_ENEMY_SPEED_MULT if enemy.elite else 1.0
-            if pursuing and dist_sq > 0:
-                target_angle = vector_to_angle(to_player)
-                enemy.angle = turn_towards(enemy.angle, target_angle, ENEMY_TURN_SPEED * dt)
-                if dist_sq <= ENEMY_HOLD_RADIUS * ENEMY_HOLD_RADIUS and ship_vel.length() <= ENEMY_HOLD_PLAYER_SPEED:
-                    speed = 0.0
+            if boss and enemy.escort and escorts_pursuing:
+                escort_override = True
+                to_player = ship_pos - enemy.pos
+                dist_sq = to_player.length_squared()
+                if dist_sq > 0:
+                    target_angle = vector_to_angle(to_player)
+                    enemy.angle = turn_towards(enemy.angle, target_angle, ENEMY_TURN_SPEED * dt)
+                speed_mult = ELITE_ENEMY_SPEED_MULT if enemy.elite else 1.0
+                enemy.vel = angle_to_vector(enemy.angle) * (ENEMY_PURSUE_SPEED * speed_mult)
+                enemy.pos = enemy.pos + enemy.vel * dt
+                if (enemy.pos - boss.pos).length_squared() > BOSS_ESCORT_LEASH_RADIUS * BOSS_ESCORT_LEASH_RADIUS:
+                    desired_pos = boss.pos + enemy.escort_offset.rotate(boss.angle)
+                    enemy.pos = pygame.Vector2(desired_pos)
+                    enemy.vel = pygame.Vector2(0, 0)
+                    enemy.angle = boss.angle
+                enemy.pursuing = True
+            if not escort_override:
+                enemy_radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)
+                to_player = ship_pos - enemy.pos
+                dist_sq = to_player.length_squared()
+                pursuing = dist_sq <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS
+                enemy.pursuing = pursuing
+                speed_mult = ELITE_ENEMY_SPEED_MULT if enemy.elite else 1.0
+                if pursuing and dist_sq > 0:
+                    target_angle = vector_to_angle(to_player)
+                    enemy.angle = turn_towards(enemy.angle, target_angle, ENEMY_TURN_SPEED * dt)
+                    if dist_sq <= ENEMY_HOLD_RADIUS * ENEMY_HOLD_RADIUS and ship_vel.length() <= ENEMY_HOLD_PLAYER_SPEED:
+                        speed = 0.0
+                    else:
+                        speed = ENEMY_PURSUE_SPEED * speed_mult
                 else:
-                    speed = ENEMY_PURSUE_SPEED * speed_mult
-            else:
-                enemy.wander_timer -= dt
-                if enemy.wander_timer <= 0:
-                    enemy.wander_timer = random.uniform(0.8, 2.2)
-                    enemy.wander_angle = (enemy.angle + random.uniform(-120, 120)) % 360
-                enemy.angle = turn_towards(enemy.angle, enemy.wander_angle, ENEMY_TURN_SPEED * dt * 0.6)
-                speed = ENEMY_SCOUT_SPEED * speed_mult
+                    enemy.wander_timer -= dt
+                    if enemy.wander_timer <= 0:
+                        enemy.wander_timer = random.uniform(0.8, 2.2)
+                        enemy.wander_angle = (enemy.angle + random.uniform(-120, 120)) % 360
+                    enemy.angle = turn_towards(enemy.angle, enemy.wander_angle, ENEMY_TURN_SPEED * dt * 0.6)
+                    speed = ENEMY_SCOUT_SPEED * speed_mult
 
-            enemy.vel = angle_to_vector(enemy.angle) * speed
-            enemy.pos = enemy.pos + enemy.vel * dt
+                enemy.vel = angle_to_vector(enemy.angle) * speed
+                enemy.pos = enemy.pos + enemy.vel * dt
+                enemy_radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)
+            else:
+                enemy_radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)
             if (
                 enemy.pos.x < -enemy_radius
                 or enemy.pos.x > WORLD_WIDTH + enemy_radius
                 or enemy.pos.y < -enemy_radius
                 or enemy.pos.y > WORLD_HEIGHT + enemy_radius
             ):
-                remove_enemy(enemies, enemy, boss_escorts)
-                continue
+                if enemy.escort:
+                    enemy.pos = clamp_position(enemy.pos, enemy_radius)
+                    enemy.vel = pygame.Vector2(0, 0)
+                else:
+                    remove_enemy(enemies, enemy, boss_escorts)
+                    continue
             fire_rate_mult = ELITE_ENEMY_FIRE_RATE_MULT if enemy.elite else 1.0
             bullet_speed_mult = ELITE_ENEMY_BULLET_SPEED_MULT if enemy.elite else 1.0
             enemy.fire_timer = max(0.0, enemy.fire_timer - dt)
             if (
-                pursuing
+                enemy.pursuing
                 and dist_sq <= ENEMY_FIRE_RANGE * ENEMY_FIRE_RANGE
                 and enemy.fire_timer <= 0.0
             ):
@@ -1943,6 +2030,7 @@ def main():
                                     spawn_enemy_shards(
                                         enemy_shards, enemy_shard_pool, boss.pos, boss.angle, COLORS["boss"]
                                     )
+                                boss_defeated = True
                                 boss = None
                         continue
                 hit_enemy = None
@@ -1973,6 +2061,7 @@ def main():
                             hit_color,
                         )
                     else:
+                        enemies_destroyed += 1
                         remove_enemy(enemies, hit_enemy, boss_escorts)
                         play_explode_sound(hit_enemy.pos)
                         score += 80 + (ELITE_ENEMY_SCORE_BONUS if hit_enemy.elite else 0)
@@ -2081,6 +2170,7 @@ def main():
                         to_kill.append(enemy)
                 for enemy in to_kill:
                     if enemy in enemies:
+                        enemies_destroyed += 1
                         remove_enemy(enemies, enemy, boss_escorts)
                         play_explode_sound(enemy.pos)
                         score += 80 + (ELITE_ENEMY_SCORE_BONUS if enemy.elite else 0)
@@ -2113,6 +2203,7 @@ def main():
                                 spawn_enemy_shards(
                                     enemy_shards, enemy_shard_pool, boss.pos, boss.angle, COLORS["boss"]
                                 )
+                            boss_defeated = True
                             boss = None
 
             for enemy in enemies[:]:
@@ -2510,7 +2601,7 @@ def main():
                 screen.blit(text, (10, 10 + (i + 1) * 20))
 
         if show_gamepad_debug:
-            help_text = "Arrows/WASD move  Q/E strafe  LShift stop  L-stick aim  R1 thrust  L1 brake  Space shoot  1 shield  2 boost  3 spread  4 mine  M map  F5 save  F6 load  F2 god shield  N new seed"
+            help_text = "Arrows/WASD move  Q/E strafe  LShift stop  L-stick aim  R1 thrust  L1 brake  Space shoot  1 shield  2 boost  3 spread  4 mine  M map  O objectives  F5 save  F6 load  F2 god shield  N new seed"
             text = font.render(help_text, True, COLORS["ui"])
             screen.blit(text, (10, HEIGHT - 28))
 

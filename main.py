@@ -1127,8 +1127,7 @@ def main():
     def play_asteroid_explode_sound():
         return
     def play_shield_sound():
-        if shield_sound:
-            shield_sound.play()
+        return
     def play_discover_sound(world_pos=None):
         if discover_sound:
             volume = 0.6

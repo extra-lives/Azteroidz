@@ -153,10 +153,11 @@ BOSS_PATROL_SPEED = 120
 BOSS_TURN_SPEED = 80
 BOSS_FIRE_COOLDOWN = 1.6
 BOSS_BULLET_SPEED = 380
+BOSS_BULLET_RADIUS = 6
 BOSS_MAX_HP = 1000
 BOSS_HIT_DAMAGE = 10
-BOSS_FORMATION_BREAK_RADIUS = 750
-BOSS_ESCORT_LEASH_RADIUS = BOSS_FORMATION_BREAK_RADIUS
+BOSS_HOLD_RADIUS = 220
+BOSS_ESCORT_SPREAD = 1.5
 BOSS_PATROL_NODE_RADIUS = 220
 BOSS_SCORE_BONUS = 900
 
@@ -238,7 +239,7 @@ COLORS = {
     "elite_enemy_shield": (220, 160, 255),
     "elite_enemy": (200, 80, 255),
     "boss": (245, 200, 90),
-    "boss_shield": (220, 60, 60),
+    "boss_shield": (245, 200, 90),
     "freighter": (150, 110, 80),
     "freighter_shield": (120, 160, 200),
     "god_shield": (255, 215, 80),
@@ -616,18 +617,18 @@ def spawn_boss_with_escorts(seed):
     )
 
     elite_offsets = [
-        pygame.Vector2(BOSS_RADIUS * 1.8, -BOSS_RADIUS * 0.8),
-        pygame.Vector2(BOSS_RADIUS * 1.8, BOSS_RADIUS * 0.8),
-        pygame.Vector2(-BOSS_RADIUS * 1.1, -BOSS_RADIUS * 1.4),
-        pygame.Vector2(-BOSS_RADIUS * 1.1, BOSS_RADIUS * 1.4),
+        pygame.Vector2(BOSS_RADIUS * 1.8, -BOSS_RADIUS * 0.8) * BOSS_ESCORT_SPREAD,
+        pygame.Vector2(BOSS_RADIUS * 1.8, BOSS_RADIUS * 0.8) * BOSS_ESCORT_SPREAD,
+        pygame.Vector2(-BOSS_RADIUS * 1.1, -BOSS_RADIUS * 1.4) * BOSS_ESCORT_SPREAD,
+        pygame.Vector2(-BOSS_RADIUS * 1.1, BOSS_RADIUS * 1.4) * BOSS_ESCORT_SPREAD,
     ]
     regular_offsets = [
-        pygame.Vector2(BOSS_RADIUS * 2.6, 0.0),
-        pygame.Vector2(BOSS_RADIUS * 0.4, -BOSS_RADIUS * 2.2),
-        pygame.Vector2(BOSS_RADIUS * 0.4, BOSS_RADIUS * 2.2),
-        pygame.Vector2(-BOSS_RADIUS * 2.0, 0.0),
-        pygame.Vector2(-BOSS_RADIUS * 0.6, -BOSS_RADIUS * 2.4),
-        pygame.Vector2(-BOSS_RADIUS * 0.6, BOSS_RADIUS * 2.4),
+        pygame.Vector2(BOSS_RADIUS * 2.6, 0.0) * BOSS_ESCORT_SPREAD,
+        pygame.Vector2(BOSS_RADIUS * 0.4, -BOSS_RADIUS * 2.2) * BOSS_ESCORT_SPREAD,
+        pygame.Vector2(BOSS_RADIUS * 0.4, BOSS_RADIUS * 2.2) * BOSS_ESCORT_SPREAD,
+        pygame.Vector2(-BOSS_RADIUS * 2.0, 0.0) * BOSS_ESCORT_SPREAD,
+        pygame.Vector2(-BOSS_RADIUS * 0.6, -BOSS_RADIUS * 2.4) * BOSS_ESCORT_SPREAD,
+        pygame.Vector2(-BOSS_RADIUS * 0.6, BOSS_RADIUS * 2.4) * BOSS_ESCORT_SPREAD,
     ]
 
     escorts = []
@@ -1689,11 +1690,7 @@ def main():
                 if (ship_pos - escort.pos).length_squared() <= ENEMY_PURSUE_RADIUS * ENEMY_PURSUE_RADIUS:
                     within_pursue_radius = True
                     break
-            if player_attack_timer > 0.0 and within_pursue_radius:
-                escorts_alerted = True
-            elif escorts_alerted and within_pursue_radius:
-                escorts_alerted = True
-            else:
+            if not within_pursue_radius:
                 escorts_alerted = False
             escorts_pursuing = escorts_alerted
         if boss:
@@ -1721,7 +1718,10 @@ def main():
                 if to_player.length_squared() > 0:
                     target_angle = vector_to_angle(to_player)
                     boss.angle = turn_towards(boss.angle, target_angle, BOSS_TURN_SPEED * dt)
-                boss.vel = angle_to_vector(boss.angle) * (SHIP_MAX_SPEED * 0.5)
+                if to_player.length_squared() <= BOSS_HOLD_RADIUS * BOSS_HOLD_RADIUS:
+                    boss.vel = pygame.Vector2(0, 0)
+                else:
+                    boss.vel = angle_to_vector(boss.angle) * (SHIP_MAX_SPEED * 0.5)
                 boss.pos += boss.vel * dt
                 boss.fire_timer = max(0.0, boss.fire_timer - dt)
                 if boss.fire_timer <= 0.0:
@@ -1731,8 +1731,14 @@ def main():
                         bullet["pos"].update(boss.pos)
                         bullet["vel"].update(bullet_vel)
                         bullet["ttl"] = ENEMY_BULLET_TTL
+                        bullet["radius"] = BOSS_BULLET_RADIUS
                     else:
-                        bullet = {"pos": pygame.Vector2(boss.pos), "vel": bullet_vel, "ttl": ENEMY_BULLET_TTL}
+                        bullet = {
+                            "pos": pygame.Vector2(boss.pos),
+                            "vel": bullet_vel,
+                            "ttl": ENEMY_BULLET_TTL,
+                            "radius": BOSS_BULLET_RADIUS,
+                        }
                     enemy_bullets.append(bullet)
                     boss.fire_timer = BOSS_FIRE_COOLDOWN
             boss.pos = clamp_position(boss.pos, BOSS_RADIUS)
@@ -1772,11 +1778,6 @@ def main():
                 speed_mult = ELITE_ENEMY_SPEED_MULT if enemy.elite else 1.0
                 enemy.vel = angle_to_vector(enemy.angle) * (ENEMY_PURSUE_SPEED * speed_mult)
                 enemy.pos = enemy.pos + enemy.vel * dt
-                if (enemy.pos - boss.pos).length_squared() > BOSS_ESCORT_LEASH_RADIUS * BOSS_ESCORT_LEASH_RADIUS:
-                    desired_pos = boss.pos + enemy.escort_offset.rotate(boss.angle)
-                    enemy.pos = pygame.Vector2(desired_pos)
-                    enemy.vel = pygame.Vector2(0, 0)
-                    enemy.angle = boss.angle
                 enemy.pursuing = True
             if not escort_override:
                 enemy_radius = ENEMY_RADIUS * (ELITE_ENEMY_SIZE_MULT if enemy.elite else 1.0)
@@ -1831,8 +1832,9 @@ def main():
                     bullet["pos"].update(enemy.pos)
                     bullet["vel"].update(bullet_vel)
                     bullet["ttl"] = ENEMY_BULLET_TTL
+                    bullet["radius"] = 2
                 else:
-                    bullet = {"pos": pygame.Vector2(enemy.pos), "vel": bullet_vel, "ttl": ENEMY_BULLET_TTL}
+                    bullet = {"pos": pygame.Vector2(enemy.pos), "vel": bullet_vel, "ttl": ENEMY_BULLET_TTL, "radius": 2}
                 enemy_bullets.append(bullet)
                 enemy.fire_timer = ENEMY_FIRE_COOLDOWN / fire_rate_mult
 
@@ -1913,7 +1915,8 @@ def main():
 
             for bullet in enemy_bullets[:]:
                 bullet_prev = prev_pos(bullet["pos"], bullet["vel"], dt)
-                if moving_circle_hit(bullet_prev, bullet["pos"], ship_prev, ship_pos, SHIP_RADIUS + 4):
+                bullet_radius = bullet.get("radius", 2)
+                if moving_circle_hit(bullet_prev, bullet["pos"], ship_prev, ship_pos, SHIP_RADIUS + bullet_radius + 2):
                     enemy_bullets.remove(bullet)
                     enemy_bullet_pool.append(bullet)
                     if shield_time <= 0:
@@ -2051,6 +2054,8 @@ def main():
                 if hit_enemy:
                     bullets.remove(bullet)
                     bullet_pool.append(bullet)
+                    if hit_enemy.escort:
+                        escorts_alerted = True
                     if hit_enemy.shield > 0:
                         hit_enemy.shield -= 1
                         score += 20
@@ -2345,7 +2350,7 @@ def main():
 
         for bullet in enemy_bullets:
             screen_pos = world_to_screen(bullet["pos"], ship_pos)
-            bullet_radius = max(1, int(2 * CAMERA_ZOOM))
+            bullet_radius = max(1, int(bullet.get("radius", 2) * CAMERA_ZOOM))
             pygame.draw.circle(
                 screen,
                 COLORS["enemy"],

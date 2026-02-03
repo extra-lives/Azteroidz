@@ -82,6 +82,7 @@ SHOOT_SOUND_PATH = os.path.join(BASE_DIR, "assets", "audio", "shoot-default.wav"
 EXPLODE_SOUND_PATH = os.path.join(BASE_DIR, "assets", "audio", "explode-default.wav")
 ASTEROID_EXPLODE_SOUND_PATH = os.path.join(BASE_DIR, "assets", "audio", "explode-asteroid.wav")
 SHIELD_SOUND_PATH = os.path.join(BASE_DIR, "assets", "audio", "shield-default.wav")
+DISCOVER_SOUND_PATH = os.path.join(BASE_DIR, "assets", "audio", "discover-default.wav")
 
 SHIP_RADIUS = 12
 SHIP_THRUST = 260
@@ -167,8 +168,9 @@ PICKUP_RADIUS = 24
 CANISTER_RADIUS = 26
 CANISTER_HITS = 4
 BOOST_MULTIPLIER = 1.5
-BOOST_TIME = 6.0
-SPREAD_TIME = 7.0
+POWERUP_TIME = 8.0
+BOOST_TIME = POWERUP_TIME
+SPREAD_TIME = POWERUP_TIME
 SPREAD_ANGLE = 12
 MINE_DROP_COOLDOWN = 0.5
 MINE_RADIUS = 32
@@ -1052,6 +1054,8 @@ def main():
     asteroid_explode_sound = None
     asteroid_explode_channel = None
     shield_sound = None
+    discover_sound = None
+    discover_channel = None
     if pygame.mixer.get_init() is None:
         try:
             pygame.mixer.init()
@@ -1087,6 +1091,14 @@ def main():
         except pygame.error:
             asteroid_explode_sound = None
             asteroid_explode_channel = None
+    if pygame.mixer.get_init() and os.path.exists(DISCOVER_SOUND_PATH):
+        try:
+            discover_sound = pygame.mixer.Sound(DISCOVER_SOUND_PATH)
+            discover_sound.set_volume(0.8)
+            discover_channel = pygame.mixer.Channel(3)
+        except pygame.error:
+            discover_sound = None
+            discover_channel = None
 
     def attenuate_volume(world_pos, base_volume=1.0):
         if world_pos is None:
@@ -1117,6 +1129,16 @@ def main():
     def play_shield_sound():
         if shield_sound:
             shield_sound.play()
+    def play_discover_sound(world_pos=None):
+        if discover_sound:
+            volume = 0.6
+            if discover_channel:
+                discover_channel.set_volume(volume)
+                discover_channel.play(discover_sound)
+            else:
+                channel = discover_sound.play()
+                if channel:
+                    channel.set_volume(volume)
     joystick = None
     joy_name = "none"
     joy_axes = 0
@@ -1216,7 +1238,7 @@ def main():
                 elif event.key == pygame.K_1 and not game_over:
                     if shield_stock > 0 and shield_time <= 0:
                         shield_stock -= 1
-                        shield_time = 8.0
+                        shield_time = POWERUP_TIME
                         shield_size_mult = 1.0
                         play_shield_sound()
                 elif event.key == pygame.K_3 and not game_over:
@@ -1231,7 +1253,7 @@ def main():
                 elif event.key == pygame.K_5 and not game_over:
                     if rapid_stock > 0 and rapid_time <= 0:
                         rapid_stock -= 1
-                        rapid_time = 7.0
+                        rapid_time = POWERUP_TIME
                 elif event.key == pygame.K_2 and not game_over:
                     if boost_stock > 0 and boost_time <= 0:
                         boost_stock -= 1
@@ -1243,7 +1265,7 @@ def main():
                 elif event.button == BTN_S and not game_over:
                     if shield_stock > 0 and shield_time <= 0:
                         shield_stock -= 1
-                        shield_time = 8.0
+                        shield_time = POWERUP_TIME
                         shield_size_mult = 1.0
                         play_shield_sound()
                 elif event.button == BTN_T and not game_over:
@@ -1901,15 +1923,15 @@ def main():
                     if pickup.kind == "boost_canister":
                         continue
                     if pickup.kind == "shield":
-                        shield_stock += 1
+                        shield_stock += 3
                     elif pickup.kind == "spread":
-                        spread_stock += 1
+                        spread_stock += 3
                     elif pickup.kind == "mine":
                         mine_stock += 3
                     elif pickup.kind == "boost":
-                        boost_stock += 1
+                        boost_stock += 3
                     else:
-                        rapid_stock += 1
+                        rapid_stock += 3
                     pickups.remove(pickup)
                     break
 
@@ -2324,6 +2346,8 @@ def main():
                             "pos": beacon_pos,
                             "code": make_beacon_id(rng),
                         }
+                    if landmark.id not in discovered_planets:
+                        play_discover_sound(landmark.pos)
                     discovered_planets.add(landmark.id)
 
         for planet_id, beacon in beacons.items():
@@ -2557,6 +2581,8 @@ def main():
         nearest_dist_sq = None
         for landmark in landmarks:
             if landmark.kind != "planet":
+                continue
+            if landmark.id not in discovered_planets:
                 continue
             delta = landmark.pos - ship_pos
             dist_sq = delta.length_squared()
